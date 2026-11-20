@@ -2490,6 +2490,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     const serverLifecycle = this._serverLifecycle ??= { shutdown: false };
     const SERVER_START_CANCELLED = "Server startup cancelled";
     // END SERVER INSTANCE STATE
+    this._daemonAddon = context.extension.id === "tb-agent@mahoje.dk";
     const extensionRoot = context.extension.rootURI;
     const resourceName = "thunderbird-mcp";
 
@@ -2508,7 +2509,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     // END TOOL ACCESS IMPORT
 
     // BEGIN UNINSTALL LISTENER REGISTRATION
-    if (!this._uninstallListener) {
+    if (!this._daemonAddon && !this._uninstallListener) {
       try {
         let AddonManager;
         try {
@@ -16330,6 +16331,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
         configureDaemon: async function(policy) {
           daemonDispatcher = undefined;
+          if (!Array.isArray(policy?.allowedAccounts) || !policy.allowedAccounts.every(id => typeof id === "string") ||
+              !Array.isArray(policy.modules) || !policy.modules.every(name => typeof name === "string")) {
+            return { success: false, error: "Invalid daemon module configuration." };
+          }
           return api.mcpServer.start(policy);
         },
 
@@ -16836,18 +16841,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     globalThis.__tbMcpStartPromise = null;
     // END SERVER SHUTDOWN
 
-    // Always clean up the connection info file so stale tokens don't linger
-    // (Inlined because getAPI() helpers are not in scope in onShutdown().)
-    try {
-      const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
-      tmpDir.append("thunderbird-mcp");
-      const connFile = tmpDir.clone();
-      connFile.append("connection.json");
-      if (connFile.exists()) {
-        connFile.remove(false);
+    // The daemon owns its own file. Leave any upstream HTTP connection file alone.
+    if (!this._daemonAddon) {
+      // Always clean up the connection info file so stale tokens don't linger
+      // (Inlined because getAPI() helpers are not in scope in onShutdown().)
+      try {
+        const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
+        tmpDir.append("thunderbird-mcp");
+        const connFile = tmpDir.clone();
+        connFile.append("connection.json");
+        if (connFile.exists()) {
+          connFile.remove(false);
+        }
+      } catch {
+        // Best-effort cleanup
       }
-    } catch {
-      // Best-effort cleanup
     }
 
     // Always clean up temp attachment files (even on app shutdown) to avoid

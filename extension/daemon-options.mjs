@@ -29,6 +29,8 @@ async function initialize() {
   }
   for (const id of permissionIds) element(id).checked = settings[id] === true;
   element("experiments").hidden = !browser.mcpServer;
+  element("allowDirectSend").closest("label").hidden = !browser.mcpServer;
+  element("allowDirectSend").disabled = !browser.mcpServer;
   for (const box of document.querySelectorAll('[name="module"]')) {
     box.checked = Array.isArray(settings.modules) && settings.modules.includes(box.value);
   }
@@ -66,7 +68,7 @@ element("access").addEventListener("submit", async event => {
     await savePermissions({
       allowedAccounts: form.getAll("account"),
       modules: browser.mcpServer ? form.getAll("module") : [],
-      ...Object.fromEntries(permissionIds.map(id => [id, element(id).checked])),
+      ...Object.fromEntries(permissionIds.map(id => [id, !element(id).disabled && element(id).checked])),
     });
     feedback.textContent = "Permissions saved.";
   } catch {

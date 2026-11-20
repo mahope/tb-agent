@@ -351,13 +351,15 @@ export async function dispatchCore(api, op, args, signal, settings) {
       const refs = args.messageIds ?? [args.messageId];
       if (!Array.isArray(refs) || !refs.length || refs.length > 200) fail("bad_request", "Supply 1–200 message IDs.");
       const source = folder(args.folderPath);
-      const trash = args.trash || op === "deleteMessages";
-      if ((trash && (args.moveTo || args.copyTo)) || (args.moveTo && args.copyTo)) {
+      const deleting = op === "deleteMessages";
+      const changes = deleting ? {} : args;
+      const trash = deleting ? special(source, "drafts") : changes.trash === true;
+      if ((trash && (changes.moveTo || changes.copyTo)) || (changes.moveTo && changes.copyTo)) {
         fail("bad_request", "Move, copy and trash are mutually exclusive.");
       }
       const move = trash ? tree.find(item => item.accountId === source.accountId && special(item, "trash")) :
-        args.moveTo ? folder(args.moveTo) : null;
-      const copy = args.copyTo ? folder(args.copyTo) : null;
+        changes.moveTo ? folder(changes.moveTo) : null;
+      const copy = changes.copyTo ? folder(changes.copyTo) : null;
       if (trash && (!move || move.id === source.id)) fail("bad_request", "No separate Trash folder is available for this account.");
       if ([move, copy].some(item => item && special(item, "outbox"))) fail("access_denied", "Messages cannot be moved or copied to Outbox.");
       const targets = [];
@@ -366,10 +368,10 @@ export async function dispatchCore(api, op, args, signal, settings) {
       for (const message of targets) {
         signal.throwIfAborted();
         const change = {};
-        if (args.read !== undefined) change.read = args.read;
-        if (args.flagged !== undefined) change.flagged = args.flagged;
-        if (args.addTags || args.removeTags) {
-          change.tags = [...new Set([...message.tags, ...(args.addTags ?? [])])].filter(tag => !args.removeTags?.includes(tag));
+        if (changes.read !== undefined) change.read = changes.read;
+        if (changes.flagged !== undefined) change.flagged = changes.flagged;
+        if (changes.addTags || changes.removeTags) {
+          change.tags = [...new Set([...message.tags, ...(changes.addTags ?? [])])].filter(tag => !changes.removeTags?.includes(tag));
         }
         if (Object.keys(change).length) await messages.update(message.id, change);
       }
@@ -378,7 +380,8 @@ export async function dispatchCore(api, op, args, signal, settings) {
       if (copy) await messages.copy(ids, copy.id);
       signal.throwIfAborted();
       if (move) await messages.move(ids, move.id);
-      return { success: true, [op === "deleteMessages" ? "deleted" : "updated"]: ids.length };
+      if (deleting && !trash) await messages.delete(ids, { isUserAction: true });
+      return { success: true, [deleting ? "deleted" : "updated"]: ids.length };
     }
     case "saveDraft":
     case "sendMail":

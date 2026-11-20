@@ -187,7 +187,7 @@ module even for a core operation. See [Optional Thunderbird integrations](experi
 | `searchAttachments` | experiment.attachments | read |
 | `refreshFolder` | experiment.folder-sync | read |
 | `updateMessage` (read, flag, tags, move, copy, trash) | core | update |
-| `deleteMessages` (move to Trash) | core | delete |
+| `deleteMessages` | core | delete |
 | `getAccountAccess`, `displayMessage` | core | read |
 | `saveDraft`, `sendMail`, `replyToMessage`, `forwardMessage` | core | create |
 

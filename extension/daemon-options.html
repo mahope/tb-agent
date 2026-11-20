@@ -9,6 +9,7 @@
     body { font: menu; max-width: 44rem; margin: 1.5rem; }
     fieldset { margin-block: 1rem; }
     label { display: block; padding-block: .25rem; }
+    label[hidden] { display: none; }
     button { margin-block: .5rem; }
   </style>
 </head>
@@ -29,7 +30,7 @@
     </fieldset>
     <fieldset>
       <legend>Mail permissions</legend>
-      <label><input type="checkbox" id="allowDirectSend"> Allow direct sends when explicitly requested</label>
+      <label hidden><input type="checkbox" id="allowDirectSend"> Allow direct sends when explicitly requested (requires Advanced mail)</label>
       <label><input type="checkbox" id="allowEncrypted"> Allow reading encrypted message content</label>
     </fieldset>
     <fieldset id="experiments" hidden>
