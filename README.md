@@ -1,4 +1,117 @@
-# Thunderbird MCP
+# tb-agent
+
+Let AI agents work in all of your mail accounts through one fast CLI and MCP server, on top of
+Thunderbird. Thunderbird keeps owning logins, OAuth, IMAP, Exchange and Graph. tb-agent adds a
+small local daemon, a `tb` command line and an MCP server in front of it, so there is only one
+login to manage and no mail credentials ever leave Thunderbird.
+
+> **Status:** early development. The daemon, CLI and MCP server (issue #1) are in place and are
+> tested against a fake extension. The extension side of the new protocol is the next step, so
+> until then the upstream extension and bridge described further down are what talk to
+> Thunderbird.
+
+## A fork of thunderbird-mcp
+
+tb-agent is a fork of **[TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp)**
+by Tomasz Kasperczyk, and it would not exist without that work. The Thunderbird extension, its
+49 tools and the mail logic behind them are upstream's, and they stay in this repository under
+`extension/` with upstream's history. Upstream is kept as a git remote so improvements can be
+merged. The original MIT license and copyright notice are kept in [LICENSE](LICENSE); new code
+in this repository is released under the same license. The original README follows below the
+tb-agent section.
+
+What is new here is the Rust daemon in `daemon/` and the changes that come with it.
+
+## Architecture
+
+```
+  AI agent ──► tb CLI ─────┐
+                           │  WebSocket, localhost,        ┌───────────────────────┐
+  AI agent ──► MCP client ─┼─ per-session token ──► tbd ◄──┤ Thunderbird extension │
+               (stdio/HTTP)│  (docs/protocol.md)    daemon │ (connects as a client)│
+                           │                               └───────────┬───────────┘
+              tb mcp ──────┘                                           │
+                                                          Thunderbird: accounts, OAuth,
+                                                          IMAP / Exchange / Graph
+```
+
+- **`tbd`, the daemon.** Listens on loopback only and writes its port and a random per-session
+  token to a connection file. It checks requests against the operation registry, relays them to
+  the extension and relays the answers back. It has no mail logins of its own.
+- **The Thunderbird extension** connects *out* to the daemon as a WebSocket client. That means
+  the core needs no Thunderbird Experiment APIs, and there is no native-messaging 1 MB limit:
+  large results are streamed in chunks. Which optional Experiment modules the extension has is
+  announced in the handshake.
+- **`tb`, the CLI.** One command per operation (`accounts`, `folders`, `search`, `get`,
+  `update`, `mark`, `tag`, `move`, `trash`, `draft`, `send`, `reply`, `forward` and more), and
+  every command prints JSON. `tb call <op>` runs any operation with raw JSON parameters.
+- **The MCP server.** `tb mcp` serves MCP over stdio, and `tb mcp --http 127.0.0.1:8787` serves
+  streamable HTTP at `/mcp`. Each protocol operation is one tool with the same name and input
+  schema. The MCP server is itself a client of the daemon, so CLI and MCP always behave the
+  same.
+
+The wire protocol is documented in [docs/protocol.md](docs/protocol.md).
+
+### Try it without Thunderbird
+
+The repository includes a fake extension that answers from a small fixed mailbox. You need a
+current stable Rust toolchain.
+
+```bash
+cd daemon
+cargo build
+export TB_CONNECTION_FILE=/tmp/tb-demo/connection.json
+
+./target/debug/tbd &                      # starts the daemon, writes the connection file
+sleep 1
+./target/debug/tb-fake-extension &        # stands in for Thunderbird
+sleep 1
+./target/debug/tb accounts
+./target/debug/tb search report
+./target/debug/tb get m1@example.com --folder imap://work@mail.example.com/INBOX
+```
+
+Exit codes of `tb`: `0` success, `1` the operation failed (error JSON on stderr), `2` usage
+error, `3` the daemon is not reachable or refused the token.
+
+### MCP client configuration
+
+```json
+{
+  "mcpServers": {
+    "tb-agent": { "command": "tb", "args": ["mcp"] }
+  }
+}
+```
+
+### Develop
+
+```bash
+cd daemon
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+The contract tests start the daemon and a fake extension in-process, so no Thunderbird is
+needed in CI. CLI output is covered by snapshot tests (`insta`).
+
+### Security model
+
+- The daemon accepts connections on loopback only and refuses to bind anything else.
+- Every connection needs the per-session token from the connection file, which is created with
+  owner-only permissions. Wrong or missing tokens get HTTP 401, and web-page origins get 403.
+- The MCP HTTP endpoint accepts only loopback `Host` headers by default. It has no
+  authentication of its own, so keep it on loopback.
+- Message content returned to agents is untrusted data. Sending still opens a compose window
+  for review unless the user has allowed direct sending in the extension.
+
+Per-account permissions, a local audit log with undo, and extension changes are tracked as
+separate issues.
+
+---
+
+# Thunderbird MCP (upstream README)
 
 [![CI](https://github.com/TKasperczyk/thunderbird-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/TKasperczyk/thunderbird-mcp/actions/workflows/ci.yml)
 [![Tools](https://img.shields.io/badge/49_Tools-email%2C_compose%2C_filters%2C_calendar%2C_contacts-blue.svg)](#what-you-can-do)
