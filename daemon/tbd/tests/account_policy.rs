@@ -526,3 +526,85 @@ async fn audited_send_preserves_explicit_extension_error() {
     assert_eq!(finished["event"], "finished");
     assert_eq!(finished["success"], false);
 }
+
+#[tokio::test]
+async fn extension_operations_cannot_bypass_account_permissions() {
+    let daemon = TestDaemon::with_policy(Some(
+        r#"
+[accounts.account1]
+access = "full"
+permissions = ["read"]
+"#,
+    ))
+    .await
+    .unwrap();
+    let extension = FakeExtension::connect(
+        daemon.extension_info(),
+        FakeConfig {
+            modules: vec![
+                "core".into(),
+                "experiment.filters".into(),
+                "experiment.folders".into(),
+                "experiment.account-setup".into(),
+                "experiment.advanced-mail".into(),
+            ],
+            ..FakeConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let client = Client::connect(daemon.info(), "extension policy test")
+        .await
+        .unwrap();
+    let compose =
+        json!({"from": "id1", "to": "a@example.invalid", "subject": "test", "body": "test"});
+    let message = json!({"messageId": "m1@example.com", "folderPath": INBOX});
+    for (op, params) in [
+        ("sendMail", compose.clone()),
+        ("saveDraft", compose.clone()),
+        ("dryRunCompose", compose),
+        (
+            "replyToMessage",
+            json!({"messageId": message["messageId"], "folderPath": INBOX, "body": "reply"}),
+        ),
+        (
+            "forwardMessage",
+            json!({"messageId": message["messageId"], "folderPath": INBOX, "to": "a@example.invalid"}),
+        ),
+        (
+            "deleteMessages",
+            json!({"messageIds": [message["messageId"]], "folderPath": INBOX}),
+        ),
+        (
+            "updateMessage",
+            json!({"messageId": message["messageId"], "folderPath": INBOX, "trash": true}),
+        ),
+        (
+            "updateMessage",
+            json!({"messageId": message["messageId"], "folderPath": INBOX, "read": false}),
+        ),
+        (
+            "updateMessage",
+            json!({"messageId": message["messageId"], "folderPath": INBOX, "addTags": ["test"]}),
+        ),
+        (
+            "updateMessage",
+            json!({"messageId": message["messageId"], "folderPath": INBOX, "moveTo": PERSONAL_INBOX}),
+        ),
+        (
+            "updateMessage",
+            json!({"messageId": message["messageId"], "folderPath": INBOX, "copyTo": PERSONAL_INBOX}),
+        ),
+        ("displayMessage", message),
+        ("emptyTrash", json!({})),
+        ("openAccountSetup", json!({})),
+    ] {
+        let denied = client
+            .request(op, params, None)
+            .await
+            .unwrap_err()
+            .to_body();
+        assert_eq!(denied.code, "permission_denied", "{op}");
+    }
+    assert!(extension.calls().is_empty());
+}

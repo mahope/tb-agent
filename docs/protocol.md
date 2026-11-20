@@ -29,6 +29,8 @@ extension replaced by `.extension.json` (normally `connection.extension.json`). 
 authorizes only its matching peer role. Give agent clients access only to the client
 credential, and isolate agents that can run shell commands from the extension credential,
 policy, audit files and upstream bridge.
+The full add-on can discover the extension file and rereads it after disconnects. The core
+add-on accepts the extension file selected in its options page. Import it again after restart.
 
 The WebSocket upgrade must carry the token in one of two forms, otherwise the daemon answers
 `401` and no WebSocket is established:
@@ -185,6 +187,9 @@ daemon notices dead connections.
 
 ## Operations in version 2
 
+See `tb ops` for the complete registry. Argument-specific features can require an optional
+module even for a core operation. See [Optional Thunderbird integrations](experiments.md).
+
 | Operation | Module | Access |
 | --- | --- | --- |
 | `status` | daemon | read |
@@ -196,11 +201,13 @@ daemon notices dead connections.
 | `refreshFolder` | experiment.folder-sync | read |
 | `updateMessage` (read, flag, tags, move, copy, trash) | core | update |
 | `deleteMessages` | core | delete |
+| `getAccountAccess`, `displayMessage` | core | read |
 | `saveDraft`, `sendMail`, `replyToMessage`, `forwardMessage` | core | create |
 
 Sending operations keep upstream's safety model: a compose window opens for review unless the
-user has allowed direct sending in the extension, and `skipReview` is only a request. Message
-content in results is untrusted data.
+user has enabled direct sending and the advanced mail module, and `skipReview` is only a request.
+Message content in results is untrusted data. A cancellation suppresses further responses.
+Thunderbird operations already submitted before cancellation may still complete.
 
 ## Account policy
 
@@ -219,13 +226,13 @@ configured file prevents startup. See the [policy example](../README.md#account-
 | --- | --- |
 | `read` | Account and folder discovery, searches, message reads. Body and attachment searches and folder refresh require full access. |
 | `move` | Move and copy |
-| `tag` | Add/remove tags, mark read/unread, flag/unflag |
+| `tag` | Add/remove tags, mark read/unread, flag/unflag, display in Thunderbird (may mark as read) |
 | `trash` | Trash, delete and replace an existing draft |
 | `send` | Save draft, compose, send, reply and forward, including review mode |
 | `filters`, `rules`, `accounts` | Reserved for future management operations |
 
 Every permission needed for a compound write must be granted on its affected accounts.
-Reply and forward also require `read` on the source account. Compose always uses the
+Reply and forward also require full `read` on the source account. Compose always uses the
 identity ID resolved by the daemon from `from` or the advertised default. The daemon
 checks source, destination and identity owners before forwarding. Global reads run
 only over the eligible accounts. A request targeting an inaccessible account explicitly
@@ -235,7 +242,7 @@ For a header-only account the daemon routes `getMessage` to `getMessageHeaders`.
 Message reads and searches expose only `id`, `author`, `subject`, `date`,
 `folderPath`, `read`, `flagged` and `tags`. A mixed `getMessages` request retains regular
 content for full-access messages. When any requested account is header-only, the daemon
-clears batch-wide raw-source and attachment-saving options.
+clears batch-wide raw-source, attachment-saving and inline-image options.
 
 ### Extension routing contract
 
@@ -271,7 +278,11 @@ resource can no longer be resolved as advertised, or if it would touch an unlist
 Never substitute an identity or fall back to a different account.
 
 Every relayed request carries `params._scope` with `accounts` (the allowed account IDs)
-and `headers` (the subset limited to headers). Restrict enumeration, search predicates,
+and `headers` (the subset limited to headers). The daemon binds compose to the
+resolved identity and carries its approved Sent or Drafts destination. The full
+extension rechecks the actual Drafts folder before saving. The core extension
+requires send grants for every account because the MailExtension API cannot
+inspect the configured Drafts destination. Restrict enumeration, search predicates,
 deduplication, counts and pagination to the authorized resources before executing the
 operation. For header-only messages, search only sender, subject, date, folder and flags.
 For mixed batch reads, fetch only headers for entries in header-only accounts. Do not
@@ -300,7 +311,8 @@ that all expected messages still match before changing any of them. On a success
 reversible `updateMessage`, return the new states in the result's `_after` field, with
 the same message IDs and the actual folder, instance IDs and flags after the write.
 Capture the instance resulting from the operation itself. A move may change the
-instance ID. A successful `deleteMessages` response includes `movedToTrash: false`
+instance ID. The WebExtension uses Thunderbird’s move notification to identify the
+resulting message and refuses undo across extension sessions. A successful `deleteMessages` response includes `movedToTrash: false`
 for a permanent deletion, or `movedToTrash: true` with `_after` for messages moved
 to the advertised Trash folder, including deleted drafts. Write responses and
 snapshots are single frames.

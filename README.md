@@ -5,22 +5,63 @@ Thunderbird. Thunderbird keeps owning logins, OAuth, IMAP, Exchange and Graph. t
 small local daemon, a `tb` command line and an MCP server in front of it, so there is only one
 login to manage and no mail credentials ever leave Thunderbird.
 
-> **Status:** early development. The daemon, CLI and MCP server (issue #1) are in place and are
-> tested against a fake extension, including account policy, auditing and undo. The
-> Thunderbird WebExtension connector for this protocol is still pending. The upstream
-> extension and bridge described below run independently of the daemon and its policy.
+The extension requires **Thunderbird Release 154 or later**.
 
-## A fork of thunderbird-mcp
+## Try it with Thunderbird
 
-tb-agent is a fork of **[TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp)**
-by Tomasz Kasperczyk, and it would not exist without that work. The Thunderbird extension, its
-49 tools and the mail logic behind them are upstream's, and they stay in this repository under
-`extension/` with upstream's history. Upstream is kept as a git remote so improvements can be
-merged. The original MIT license and copyright notice are kept in [LICENSE](LICENSE); new code
-in this repository is released under the same license. The original README follows below the
-tb-agent section.
+Build the XPI from your checkout or download it from a matching CI run.
 
-What is new here is the Rust daemon in `daemon/` and the changes that come with it.
+1. Build the daemon and extension from the repository root.
+
+   ```bash
+   cargo build --manifest-path daemon/Cargo.toml --workspace --locked
+   node scripts/build-xpi.cjs --core
+   ```
+
+2. In Thunderbird, open Add-ons Manager and install `dist/tb-agent-core.xpi` from
+   its gear menu. Start `daemon/target/debug/tbd` in a terminal.
+3. Open **tb-agent → Options** in Add-ons Manager. Import the `connection.extension.json`
+   file next to the client connection file printed by `tbd`, select the accounts clients may access,
+   and save permissions. No accounts are exposed until selected.
+4. In another terminal, run:
+
+   ```bash
+   daemon/target/debug/tb status
+   daemon/target/debug/tb accounts
+   daemon/target/debug/tb search report
+   ```
+
+The core XPI reconnects with backoff using the imported connection. Import the
+new file after `tbd` restarts because the port and token can change. If you set
+a custom `TB_CONNECTION_FILE`, use the same path for `tbd` and `tb`.
+
+The full package (`node scripts/build-xpi.cjs`, output `dist/thunderbird-mcp.xpi`)
+supports automatic file discovery when Thunderbird allows Experiments. It also
+offers the optional modules in [docs/experiments.md](docs/experiments.md).
+If Thunderbird requires it for installing the full package, enable
+`extensions.experiments.enabled` in Thunderbird's Config Editor. Its
+**Options** page lets you opt into individual modules. An imported file
+overrides discovery. Clear it to return to automatic discovery.
+
+## Upstream
+
+tb-agent is a fork of [TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp)
+by Tomasz Kasperczyk. The original MIT copyright notice remains in [LICENSE](LICENSE).
+The optional integrations retain upstream mail logic and its tests. To bring
+in changes, add the `upstream` remote once per clone and merge on a branch
+based on this fork's `main`:
+
+```bash
+git remote add upstream https://github.com/TKasperczyk/thunderbird-mcp.git
+git fetch upstream
+git switch -c merge-upstream origin/main
+git merge upstream/main
+```
+
+Resolve changes to the Experiment handlers, refresh the corresponding
+schemas in `daemon/protocol/ops.json` when upstream tool inputs change, and
+run the verification commands below. Keep the tb-agent manifest, startup
+page and WebSocket transport when integrating changes.
 
 ## Architecture
 
@@ -35,8 +76,8 @@ What is new here is the Rust daemon in `daemon/` and the changes that come with 
                                                           IMAP / Exchange / Graph
 ```
 
-- **`tbd`, the daemon.** Listens on loopback only and writes its port and a random per-session
-  token to a connection file. It checks requests against the operation registry, relays them to
+- **`tbd`, the daemon.** Listens on loopback only and writes separate per-session connection
+  credentials for agent clients and the extension. It checks requests against the operation registry, relays them to
   the extension and relays the answers back. It has no mail logins of its own.
 - **The Thunderbird extension** connects *out* to the daemon as a WebSocket client. That means
   the core needs no Thunderbird Experiment APIs, and there is no native-messaging 1 MB limit:
@@ -69,7 +110,6 @@ sleep 1
 ./target/debug/tb accounts
 ./target/debug/tb search report
 ./target/debug/tb get m1@example.com --folder imap://work@mail.example.com/INBOX
-# The default policy returns headers. Grant full + read to account1 to read its body.
 ```
 
 Exit codes of `tb`: `0` success, `1` the operation failed (error JSON on stderr), `2` usage
@@ -92,6 +132,12 @@ cd daemon
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
+cd ..
+npm test
+npm ci --ignore-scripts
+npm run lint
+node scripts/build-xpi.cjs
+node scripts/build-xpi.cjs --core
 ```
 
 The contract tests start the daemon and a fake extension in-process, so no Thunderbird is
@@ -107,6 +153,11 @@ needed in CI. CLI output is covered by snapshot tests (`insta`).
   process can use it, so a token is mandatory for non-loopback addresses.
 - Message content returned to agents is untrusted data. Sending still opens a compose window
   for review unless the user has allowed direct sending in the extension.
+
+The extension's account selection and the daemon policy both apply to WebSocket
+requests. Direct sending requires both the user opt-in and the advanced mail module.
+The optional upstream HTTP bridge has its own settings. Keep it disabled for clients
+that should only have daemon-authorized access.
 
 ### Account policy and undo
 
@@ -130,7 +181,11 @@ sender, subject, date, folder, read and flagged status, and tags. `headers` gran
 read access. `off` disables access. `full` enables the explicitly listed permissions.
 `move` covers move and copy, `tag` covers tags and read/flagged changes, `trash`
 covers trash and deletion, and `send` covers compose, send, draft, reply and forward.
-An explicit move into Trash also requires `trash`.
+An explicit move into Trash also requires `trash`. Display in Thunderbird needs
+`read` and `tag` because the UI can automatically mark a message as read.
+Deletion moves messages to the registered Trash; deleting from Trash is permanent.
+The core XPI can save a draft when all Thunderbird accounts are selected and have
+`send` permission. The full XPI checks the configured draft destination directly.
 `filters`, `rules` and `accounts` are accepted for future operations.
 
 Writes go to the local JSONL audit log under the platform local data directory
@@ -146,6 +201,8 @@ and its lock file private. See the protocol for timeout and undo behavior.
 ---
 
 # Thunderbird MCP (upstream README)
+
+The sections below describe upstream Thunderbird MCP and its HTTP bridge. For this fork, use the daemon setup above.
 
 [![CI](https://github.com/TKasperczyk/thunderbird-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/TKasperczyk/thunderbird-mcp/actions/workflows/ci.yml)
 [![Tools](https://img.shields.io/badge/49_Tools-email%2C_compose%2C_filters%2C_calendar%2C_contacts-blue.svg)](#what-you-can-do)
@@ -460,80 +517,12 @@ The "Contact Writes" section controls **Allow contact writes**, which defaults t
 
 ---
 
-## Setup
+## Legacy HTTP setup
 
-### 1. Install the extension
-
-```bash
-git clone https://github.com/TKasperczyk/thunderbird-mcp.git
-```
-
-Install `dist/thunderbird-mcp.xpi` in Thunderbird (Tools > Add-ons > Install from File), then restart. A pre-built XPI is included in the repo -- no build step needed.
-
-**Automatic updates:** From v0.7.3 on, the add-on auto-updates through Thunderbird's add-on update check. Thunderbird downloads updates in the background and applies them on the next restart; because this add-on uses an experiment API, updates are not live hot-swapped. v0.7.3 is the last build you need to install by hand because older builds have no `update_url` and cannot auto-discover it. Thunderbird ships with `xpinstall.signatures.required=false`, so unsigned auto-updates work out of the box; a profile hardened to require signatures blocks both manual and automatic installs. If updates do not arrive, check the Add-ons gear menu and make sure **Update Add-ons Automatically** is enabled.
-
-### 2. Configure your MCP client
-
-Add to your MCP client config (e.g. `~/.claude.json` for Claude Code):
-
-```json
-{
-  "mcpServers": {
-    "thunderbird-mail": {
-      "command": "node",
-      "args": ["/absolute/path/to/thunderbird-mcp/mcp-bridge.cjs"]
-    }
-  }
-}
-```
-
-#### Connecting HTTP-capable clients directly
-
-The extension serves MCP over HTTP itself (`POST /`: `initialize`, `tools/list`, `tools/call`, notifications), so clients that support HTTP transport can skip the bridge. Read the current `port` and `token` from `connection.json`, then replace `<port>` and `<token>` below:
-
-```bash
-claude mcp add --transport http thunderbird "http://127.0.0.1:<port>/" --header "Authorization: Bearer <token>"
-```
-
-- Read the port from `connection.json` after each server restart instead of pinning `8765`. The server tries ports 8765-8774; Options shows the selected port and a notice when it differs from the default.
-- A stable token can survive restarts, but does not make the port stable. On shared machines, use the stdio bridge with automatic discovery instead of a pinned port with a stable token.
-- Responses are plain JSON; there is no SSE stream and no `Mcp-Session-Id`, both optional in the Streamable HTTP spec.
-- Path attachments are then read by the extension itself, under the same attachment policy as the bridge, and inside the Snap/Flatpak sandbox where applicable (the bridge is what makes host paths work for sandboxed installs).
-- Keep this on localhost. For a client on another machine or container, prefer an SSH tunnel or a TLS proxy bound to loopback over "Listen on all interfaces": that mode is plain HTTP, so the token and mail content cross the network unencrypted.
-
-### Sandbox-aware connection discovery
-
-The bridge re-discovers `connection.json` on every cache miss. It tries these locations in order:
-
-1. `THUNDERBIRD_MCP_CONNECTION_FILE`, if set
-2. Native temp dir: `<os.tmpdir()>/thunderbird-mcp/connection.json`
-3. macOS fallback: `/var/folders/*/*/T/thunderbird-mcp/connection.json` owned by the current user
-4. Linux Snap: Thunderbird's live `TMPDIR` from `/proc/<pid>/environ`, plus the official snap fallback under `~/Downloads/thunderbird.tmp`
-5. Linux Flatpak / Betterbird Flatpak: `$XDG_RUNTIME_DIR/app/<id>/thunderbird-mcp/connection.json` and `~/.var/app/<id>/cache/tmp/thunderbird-mcp/connection.json`
-
-This covers native installs, the official Thunderbird snap, Thunderbird Flatpak, Thunderbird Beta Flatpak, and Betterbird Flatpak without changing the extension side. If multiple sandbox candidates exist at once, the bridge tries the newest file first. Flatpak discovery accepts only these application IDs: `org.mozilla.Thunderbird`, `org.mozilla.thunderbird`, `org.mozilla.thunderbird_esr`, `net.thunderbird.Thunderbird`, and `eu.betterbird.Betterbird`. Set `THUNDERBIRD_MCP_CONNECTION_FILE` to force a single explicit path.
-
-Every connection file, including an explicit pin, must be a regular file of at most 4 KiB with a valid port and token. On Linux and macOS it must also belong to the bridge's user, have no group/other permissions (normally `0600`), and must not be a symlink. Rejected files are reported, never repaired or deleted. An invalid explicit pin does not fall back to discovery.
-
-Example override:
-
-```json
-{
-  "mcpServers": {
-    "thunderbird-mail": {
-      "command": "node",
-      "args": ["/absolute/path/to/thunderbird-mcp/mcp-bridge.cjs"],
-      "env": {
-        "THUNDERBIRD_MCP_CONNECTION_FILE": "/absolute/path/to/connection.json"
-      }
-    }
-  }
-}
-```
-
-That's it. Your AI can now access Thunderbird.
-
----
+The original HTTP server and Node MCP bridge are documented in the
+[upstream project](https://github.com/TKasperczyk/thunderbird-mcp).
+For tb-agent, build the XPI from this checkout and follow
+[Try it with Thunderbird](#try-it-with-thunderbird).
 
 ### Outgoing attachments
 

@@ -21,7 +21,7 @@ fn public_call(env: &Env) -> (String, Value) {
     let (op, mut params) = env.last_call();
     let params_map = params.as_object_mut().unwrap();
     assert!(params_map.remove("_scope").is_some());
-    params_map.remove("_expected");
+    params_map.retain(|key, _| !key.starts_with('_'));
     (op, params)
 }
 
@@ -193,6 +193,7 @@ async fn mutations_send_the_expected_parameters() {
         )
     );
     assert_eq!(env.last_call().1["trash"], true);
+    assert_eq!(env.last_call().1["_trashFolder"], TRASH);
 
     insta::assert_json_snapshot!(
         "delete",
@@ -276,6 +277,7 @@ async fn compose_commands() {
         )
     );
     assert_eq!(env.last_call().1["skipReview"], true);
+    assert_eq!(env.last_call().1["_identityAccount"], "account1");
 
     let out = env
         .tb(&[

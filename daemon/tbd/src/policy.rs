@@ -90,6 +90,10 @@ impl Policy {
             .map_or(permission == Permission::Read, |p| p.allows(permission))
     }
 
+    pub fn allows_on_all(&self, accounts: &BTreeSet<String>, permission: Permission) -> bool {
+        accounts.iter().all(|id| self.allows(id, permission))
+    }
+
     fn headers(&self, account: &str) -> bool {
         self.accounts
             .get(account)
@@ -127,6 +131,7 @@ impl Policy {
         inventory: &Inventory,
         op: &str,
         mut params: Value,
+        independent: bool,
     ) -> Result<Route, &'static str> {
         use Permission::*;
         let mut accounts = BTreeSet::new();
@@ -137,8 +142,8 @@ impl Policy {
         let mut forwarded = op.to_owned();
 
         match op {
-            "listAccounts" | "listFolders" | "searchMessages" | "getRecentMessages"
-            | "searchAttachments" => {
+            "listAccounts" | "getAccountAccess" | "listFolders" | "searchMessages"
+            | "getRecentMessages" | "searchAttachments" => {
                 if let Some(folder) = params["folderPath"].as_str() {
                     accounts.insert(owner(inventory, folder)?.to_owned());
                 }
@@ -165,13 +170,20 @@ impl Policy {
                     return Err(DENIED);
                 }
             }
-            "getMessage" | "getMessageHeaders" | "batchGetMessageHeaders" | "refreshFolder" => {
+            "getMessage"
+            | "getMessageHeaders"
+            | "batchGetMessageHeaders"
+            | "refreshFolder"
+            | "displayMessage" => {
                 let account = folder_account(inventory, &params)?;
                 if !self.allows(account, Read) {
                     return Err(DENIED);
                 }
+                if op == "displayMessage" {
+                    permissions.extend([Read, Tag]);
+                }
                 if self.headers(account) {
-                    if op == "refreshFolder" {
+                    if matches!(op, "refreshFolder" | "displayMessage") {
                         return Err(DENIED);
                     }
                     if op == "getMessage" {
@@ -199,7 +211,7 @@ impl Policy {
                     *item = json!({"messageId": id, "folderPath": item["folderPath"]});
                 }
                 if accounts.iter().any(|account| self.headers(account)) {
-                    for key in ["saveAttachments", "rawSource"] {
+                    for key in ["saveAttachments", "rawSource", "includeInlineImages"] {
                         params
                             .as_object_mut()
                             .expect("normalized params")
@@ -243,26 +255,34 @@ impl Policy {
                         permissions.insert(Trash);
                     }
                 }
+                let is_copy = copy_to.is_some();
                 if trash || op == "deleteMessages" {
                     permissions.insert(Trash);
                     if let Some(target) = inventory.trash_folders.get(account) {
                         accounts.insert(owner(inventory, target)?.to_owned());
+                        params["_trashFolder"] = json!(target);
                     } else if trash {
                         return Err(DENIED);
                     }
                 }
+                params["_allowTrashMove"] = json!(self.allows_on_all(&accounts, Trash));
                 reversible = if op == "deleteMessages" {
                     inventory.trash_folders.contains_key(account)
                 } else {
-                    copy_to.is_none()
+                    !is_copy
                 };
                 if permissions.is_empty() {
                     return Err(DENIED);
                 }
             }
-            "saveDraft" | "sendMail" | "replyToMessage" | "forwardMessage" => {
+            "saveDraft" | "sendMail" | "replyToMessage" | "forwardMessage" | "dryRunCompose" => {
                 let identity_id = match params["from"].as_str() {
-                    Some(from) if inventory.identities.contains_key(from) => from,
+                    Some(from) if inventory.identities.contains_key(from) => inventory
+                        .identities
+                        .get_key_value(from)
+                        .ok_or(DENIED)?
+                        .0
+                        .as_str(),
                     Some(from) => {
                         let mut matches = inventory
                             .identities
@@ -285,12 +305,21 @@ impl Policy {
                 if draft {
                     let folder = identity.drafts_folder.as_deref().ok_or(DENIED)?;
                     accounts.insert(owner(inventory, folder)?.to_owned());
+                    params["_draftFolder"] = json!(folder);
+                    params["_draftAccounts"] = json!(
+                        inventory
+                            .accounts
+                            .iter()
+                            .filter(|id| self.allows(id, Send))
+                            .collect::<Vec<_>>()
+                    );
                 } else if let Some(folder) = &identity.sent_folder {
                     accounts.insert(owner(inventory, folder)?.to_owned());
+                    params["_sentFolder"] = json!(folder);
                 }
                 if op == "replyToMessage" || op == "forwardMessage" {
                     let account = folder_account(inventory, &params)?;
-                    if !self.allows(account, Read) {
+                    if !self.allows(account, Read) || self.headers(account) {
                         return Err(DENIED);
                     }
                     accounts.insert(account.to_owned());
@@ -300,23 +329,29 @@ impl Policy {
                 if params.get("replaceMessageId").is_some()
                     || params.get("replaceFolderPath").is_some()
                 {
-                    let folder = params["replaceFolderPath"].as_str().ok_or(DENIED)?;
+                    let folder = params["replaceFolderPath"]
+                        .as_str()
+                        .ok_or(DENIED)?
+                        .to_owned();
                     let id = params["replaceMessageId"]
                         .as_str()
                         .filter(|id| !id.is_empty())
                         .ok_or(DENIED)?;
-                    let account = owner(inventory, folder)?;
+                    let account = owner(inventory, &folder)?;
                     accounts.insert(account.to_owned());
+                    message_ids.push(id.to_owned());
                     if let Some(trash) = inventory.trash_folders.get(account) {
                         accounts.insert(owner(inventory, trash)?.to_owned());
+                        params["_trashFolder"] = json!(trash);
                     }
                     permissions.insert(Trash);
-                    message_ids.push(id.to_owned());
-                    snapshot_folder = Some(folder.to_owned());
+                    snapshot_folder = Some(folder);
                 }
+                params["_identityAccount"] = json!(identity.account_id);
                 params["from"] = json!(identity_id);
                 permissions.insert(Send);
             }
+            _ if independent => {}
             _ => return Err(DENIED),
         }
         if !accounts
@@ -384,7 +419,7 @@ impl Scope {
     pub fn project(&self, inventory: &Inventory, op: &str, result: Value) -> Value {
         let project_item = |item: Value| {
             let account = match op {
-                "listAccounts" => item["id"].as_str(),
+                "listAccounts" | "getAccountAccess" => item["id"].as_str(),
                 "listFolders" => item["accountId"].as_str(),
                 _ => folder_account(inventory, &item).ok(),
             };
@@ -394,7 +429,7 @@ impl Scope {
             if !self.headers.contains(account) || op == "listFolders" {
                 return item;
             }
-            let keys: &[&str] = if op == "listAccounts" {
+            let keys: &[&str] = if matches!(op, "listAccounts" | "getAccountAccess") {
                 &["id"]
             } else {
                 &[
@@ -466,6 +501,31 @@ impl Scope {
             };
         }
         match result {
+            Value::Object(mut fields) if op == "getAccountAccess" => {
+                let accounts = fields
+                    .remove("accounts")
+                    .and_then(|value| value.as_array().cloned())
+                    .unwrap_or_default();
+                json!({"mode": "restricted", "accounts": project_list(accounts)})
+            }
+            Value::Object(mut fields) if op == "batchGetMessageHeaders" => {
+                let Some(Value::Object(headers)) = fields.remove("headers") else {
+                    return Value::Null;
+                };
+                let headers: serde_json::Map<_, _> = headers
+                    .into_iter()
+                    .map(|(id, row)| {
+                        let row = project_item(row);
+                        let row = if row.is_null() {
+                            json!({"error": "message could not be read"})
+                        } else {
+                            row
+                        };
+                        (id, row)
+                    })
+                    .collect();
+                json!({"headers": headers, "total": fields["total"], "failed": fields["failed"]})
+            }
             Value::Object(fields) if op == "listFolders" => {
                 let Some(columns) = fields.get("columns").and_then(Value::as_array) else {
                     return Value::Null;

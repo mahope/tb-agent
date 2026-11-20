@@ -42,7 +42,12 @@ impl ConnectionInfo {
     /// WebSocket URL without credentials. Clients send the token in an
     /// `Authorization: Bearer` header.
     pub fn ws_url(&self) -> String {
-        format!("ws://{}:{}{}", self.host, self.port, crate::WS_PATH)
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        format!("ws://{}:{}{}", host, self.port, crate::WS_PATH)
     }
 
     pub fn read(path: &Path) -> Result<Self, ConnectionError> {

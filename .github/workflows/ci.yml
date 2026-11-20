@@ -38,9 +38,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22.x'
-      # No package-lock.json is committed, so install (not ci) for the devDeps.
       - name: Install dev dependencies
-        run: npm install --no-package-lock --ignore-scripts
+        run: npm ci --ignore-scripts
       - name: Lint
         run: npm run lint
 
@@ -62,5 +61,20 @@ jobs:
             exit 1
           fi
           echo "Versions in sync: $PKG"
-      - name: Build extension
-        run: bash scripts/build.sh
+
+
+  extension-xpi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.x'
+      - name: Build and verify both Thunderbird packages
+        run: |
+          node scripts/build-xpi.cjs
+          node scripts/build-xpi.cjs --core
+          unzip -t dist/thunderbird-mcp.xpi
+          unzip -t dist/tb-agent-core.xpi

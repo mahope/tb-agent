@@ -14,7 +14,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::AbortHandle;
 
 use crate::audit::{Audit, MessageState, WriteIntent};
-use crate::policy::{Policy, Scope};
+use crate::policy::{Permission, Policy, Scope};
 use tb_protocol::frame::Inventory;
 
 /// What the writer task of a connection sends.
@@ -240,11 +240,15 @@ impl Hub {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),
             );
-            let route = match self.policy.route(inventory, op, params) {
+            let independent = matches!(
+                spec.module.as_str(),
+                "experiment.calendar" | "experiment.contacts"
+            );
+            let route = match self.policy.route(inventory, op, params, independent) {
                 Ok(route) => route,
                 Err(message) => return reply(Frame::err(id, code::PERMISSION_DENIED, message)),
             };
-            if route.scope.accounts.is_empty() {
+            if route.scope.accounts.is_empty() && !independent {
                 return reply(Frame::ok(id, empty_result(op, &route.params)));
             }
             let mut params = route.params;
@@ -367,7 +371,10 @@ impl Hub {
         let forward = request(
             "restoreMessages".into(),
             json!({
-                "_scope": scope.wire(), "expected": undo.after, "restore": undo.write.previous,
+                "_scope": scope.wire(),
+                "_allowTrashMove": self.policy.allows_on_all(&scope.accounts, Permission::Trash),
+                "_allowTagRestore": self.policy.allows_on_all(&scope.accounts, Permission::Tag),
+                "expected": undo.after, "restore": undo.write.previous,
             }),
         );
         let intent = WriteIntent {
@@ -726,7 +733,10 @@ fn checked_states(value: Option<Value>, ids: &[String], folder: &str) -> Option<
 }
 
 fn empty_result(op: &str, params: &Value) -> Value {
-    if matches!(op, "searchMessages" | "getRecentMessages") && params.get("offset").is_some() {
+    if op == "getAccountAccess" {
+        json!({"mode": "restricted", "accounts": []})
+    } else if matches!(op, "searchMessages" | "getRecentMessages") && params.get("offset").is_some()
+    {
         json!({"messages": [], "totalMatches": 0, "offset": params["offset"],
             "limit": params.get("maxResults").cloned().unwrap_or(json!(50)), "hasMore": false})
     } else if op == "listFolders" && params["format"] == "table" {

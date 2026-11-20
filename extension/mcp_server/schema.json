@@ -1,29 +1,8 @@
 [
   {
     "namespace": "mcpServer",
-    "description": "MCP HTTP server for AI integration",
+    "description": "Optional Thunderbird integrations for tb-agent",
     "functions": [
-      {
-        "name": "start",
-        "type": "function",
-        "async": true,
-        "description": "Start the MCP HTTP server on localhost",
-        "parameters": []
-      },
-      {
-        "name": "getServerInfo",
-        "type": "function",
-        "async": true,
-        "description": "Get current server status, port, connection file path, build information, and lastError (the last startup error message, or null before a failure or after a successful start). Available only to the extension, not over MCP.",
-        "parameters": []
-      },
-      {
-        "name": "getCurrentAuthToken",
-        "type": "function",
-        "async": true,
-        "description": "Get the auth token currently used by the running MCP server",
-        "parameters": []
-      },
       {
         "name": "getAccountAccessConfig",
         "type": "function",
@@ -47,7 +26,9 @@
           {
             "name": "disabledTools",
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Array of displayed tool names to disable. Restrictions for tools absent from this version are preserved."
           },
           {
@@ -71,7 +52,9 @@
           {
             "name": "allowedAccountIds",
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Array of account IDs to allow. Empty array means all accounts."
           }
         ]
@@ -167,53 +150,6 @@
         ]
       },
       {
-        "name": "getStableAuthToken",
-        "type": "function",
-        "async": true,
-        "description": "Get the stored stable auth token preference",
-        "parameters": []
-      },
-      {
-        "name": "setStableAuthToken",
-        "type": "function",
-        "async": true,
-        "description": "Set the stored stable auth token preference",
-        "parameters": [
-          {
-            "name": "stableAuthToken",
-            "type": "string",
-            "description": "Stable token to reuse across MCP server starts. Empty string clears the preference and restores per-startup rotation."
-          }
-        ]
-      },
-      {
-        "name": "generateAuthToken",
-        "type": "function",
-        "async": true,
-        "description": "Generate a fresh auth token string",
-        "parameters": []
-      },
-      {
-        "name": "getListenAll",
-        "type": "function",
-        "async": true,
-        "description": "Get whether the server listens on all network interfaces",
-        "parameters": []
-      },
-      {
-        "name": "setListenAll",
-        "type": "function",
-        "async": true,
-        "description": "Set whether the server listens on all network interfaces. When enabled, the server is accessible from other machines on your network (e.g. WSL, Docker) over plain HTTP. Warning: the authentication token and mail content travel in clear text on the LAN.",
-        "parameters": [
-          {
-            "name": "listenAll",
-            "type": "boolean",
-            "description": "When true, server binds to 0.0.0.0 instead of 127.0.0.1. Server will be restarted."
-          }
-        ]
-      },
-      {
         "name": "setSendLaterInfo",
         "type": "function",
         "async": true,
@@ -226,6 +162,61 @@
             "description": "{ uuid, checkedAt, sendDrafts, sendUnsentMsgs, checkTimePref }, or null. checkedAt is the refresh start time in Unix milliseconds; snapshots older than three minutes cannot schedule delivery."
           }
         ]
+      },
+      {
+        "name": "configureDaemon",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "policy",
+            "type": "any"
+          }
+        ]
+      },
+      {
+        "name": "callDaemonTool",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "args",
+            "type": "any"
+          },
+          {
+            "name": "requestId",
+            "type": "string"
+          }
+        ]
+      },
+      {
+        "name": "cancelDaemonTool",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "requestId",
+            "type": "string"
+          }
+        ]
+      },
+      {
+        "name": "readDraftFolder",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          { "name": "identityId", "type": "string" }
+        ]
+      },
+      {
+        "name": "readDaemonConnection",
+        "type": "function",
+        "async": true,
+        "parameters": []
       }
     ]
   }

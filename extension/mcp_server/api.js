@@ -7,7 +7,7 @@
 // addon_parent is a sandbox, not a window or a system ES module. These names
 // are supported by xpc::GlobalProperties in js/xpconnect/src/Sandbox.cpp.
 try {
-  Cu.importGlobalProperties(["DOMParser", "atob", "btoa", "TextDecoder", "TextEncoder"]);
+  Cu.importGlobalProperties(["AbortController", "DOMParser", "atob", "btoa", "TextDecoder", "TextEncoder"]);
 } catch (e) {
   console.warn("thunderbird-mcp: failed to import Experiment globals:", e);
 }
@@ -2490,6 +2490,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     const serverLifecycle = this._serverLifecycle ??= { shutdown: false };
     const SERVER_START_CANCELLED = "Server startup cancelled";
     // END SERVER INSTANCE STATE
+    this._daemonAddon = context.extension.id === "tb-agent@mahoje.dk";
     const extensionRoot = context.extension.rootURI;
     const resourceName = "thunderbird-mcp";
 
@@ -2508,7 +2509,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     // END TOOL ACCESS IMPORT
 
     // BEGIN UNINSTALL LISTENER REGISTRATION
-    if (!this._uninstallListener) {
+    if (!this._daemonAddon && !this._uninstallListener) {
       try {
         let AddonManager;
         try {
@@ -3863,35 +3864,50 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
       }
     }
 
-    return {
+    let daemonDispatcher;
+    const daemonRequests = new Map();
+    const upstreamPrivacyOptIn = isPrivacyOptInEnabled;
+    const upstreamContactWriteGate = getContactWriteBlockedResult;
+    const api = {
       mcpServer: {
         // BEGIN SERVER LIFECYCLE
-        start: async function() {
+        start: async function(daemonPolicy) {
           if (serverLifecycle.shutdown) return { success: false, error: SERVER_START_CANCELLED };
           // Guard against double-start on extension reload (port conflict)
-          if (globalThis.__tbMcpStartPromise) {
+          if (!daemonPolicy && globalThis.__tbMcpStartPromise) {
             return await globalThis.__tbMcpStartPromise;
           }
           const startup = { cancelled: false, cancelProbe: null };
-          globalThis.__tbMcpStartup = startup;
+          if (!daemonPolicy) globalThis.__tbMcpStartup = startup;
           const startPromise = (async () => {
           let startedServer = null;
           try {
             // Stop any previously running server (e.g. extension reload)
-            if (globalThis.__tbMcpServer) {
+            if (!daemonPolicy && globalThis.__tbMcpServer) {
               try { globalThis.__tbMcpServer.stop(() => {}); } catch { /* ignore */ }
               globalThis.__tbMcpServer = null;
               stopConnectionInfoRefreshTimer();
             }
-            const { HttpServer } = ChromeUtils.importESModule(
+            const HttpServer = daemonPolicy ? null : ChromeUtils.importESModule(
               "resource://thunderbird-mcp/httpd.sys.mjs?" + Date.now()
-            );
+            ).HttpServer;
             const { NetUtil } = ChromeUtils.importESModule(
               "resource://gre/modules/NetUtil.sys.mjs"
             );
             const { MailServices } = ChromeUtils.importESModule(
               "resource:///modules/MailServices.sys.mjs"
             );
+            function isPrivacyOptInEnabled(pref) {
+              if (daemonPolicy && pref === PREF_ALLOW_ENCRYPTED_MESSAGES) return daemonPolicy.allowEncrypted === true;
+              return upstreamPrivacyOptIn(pref);
+            }
+
+            function getContactWriteBlockedResult(name) {
+              if (daemonPolicy && daemonPolicy.allowContactWrites === true &&
+                  !Services.prefs.prefIsLocked?.(PREF_ALLOW_CONTACT_WRITES)) return null;
+              return upstreamContactWriteGate(name);
+            }
+
             // BEGIN CONTACT MODULE IMPORTS
             let VCardPropertyEntry;
             try {
@@ -4375,7 +4391,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }, CONNECTION_FILE_REFRESH_MS, Ci.nsITimer.TYPE_REPEATING_SLACK);
             }
 
-            const authToken = getStableAuthTokenPref() || generateAuthToken();
+            const authToken = daemonPolicy ? null : getStableAuthTokenPref() || generateAuthToken();
 
             /**
              * Constant-time string comparison to prevent timing side-channel attacks.
@@ -4398,7 +4414,10 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             // BEGIN SERVER ACCESS HELPERS
             function getAllowedAccountIds() {
               const { values, corrupt } = readAccessListPref(PREF_ALLOWED_ACCOUNTS);
-              return corrupt ? ["__invalid__"] : values;
+              if (corrupt) return ["__invalid__"];
+              if (typeof daemonPolicy === "undefined" || !daemonPolicy) return values;
+              const allowed = daemonPolicy.allowedAccounts.filter(id => !values.length || values.includes(id));
+              return allowed.length ? allowed : ["__invalid__"];
             }
 
             /**
@@ -4426,7 +4445,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              */
             function isSkipReviewBlocked() {
               try {
-                return Services.prefs.getBoolPref(PREF_BLOCK_SKIPREVIEW, true);
+                const policy = typeof daemonPolicy === "undefined" ? null : daemonPolicy;
+                return (policy && policy.allowDirectSend !== true) ||
+                  Services.prefs.getBoolPref(PREF_BLOCK_SKIPREVIEW, !policy);
               } catch {
                 // Fail closed: if we can't read the pref, assume blocked so the
                 // user retains ability to review before send.
@@ -4457,6 +4478,9 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
              * restriction is active, unless the matching opt-in is enabled.
              */
             function isPrivacyScopeRestricted(pref) {
+              if (typeof daemonPolicy !== "undefined" && daemonPolicy) {
+                return !daemonPolicy.modules.includes(pref === PREF_ALLOW_ALL_CALENDARS ? "experiment.calendar" : "experiment.contacts");
+              }
               return getAllowedAccountIds().length > 0 && !isPrivacyOptInEnabled(pref);
             }
 
@@ -7671,7 +7695,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               event.organizer = organizer;
             }
 
-            async function createEvent(title, startDate, endDate, location, description, calendarId, allDay, skipReview, status, showAs, categories, onlineMeeting, recurrence, attendees, reminders) {
+            async function createEvent(title, startDate, endDate, location, description, calendarId, allDay, skipReview, status, showAs, categories, onlineMeeting, recurrence, attendees, reminders, signal) {
               if (!cal || !CalEvent) {
                 return { error: "Calendar module not available" };
               }
@@ -7819,6 +7843,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 ensureOrganizer(event, targetCalendar);
 
                 if (skipReview) {
+                  signal?.throwIfAborted();
                   await targetCalendar.addItem(event);
                   return { success: true, message: `Event "${title}" added to calendar "${targetCalendar.name}"` };
                 }
@@ -7833,6 +7858,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   },
                 };
 
+                signal?.throwIfAborted();
                 win.openDialog(
                   "chrome://calendar/content/calendar-event-dialog.xhtml",
                   "_blank",
@@ -8156,7 +8182,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               };
             }
 
-            async function updateTask(taskId, calendarId, title, dueDate, description, completed, percentComplete, priority) {
+            async function updateTask(taskId, calendarId, title, dueDate, description, completed, percentComplete, priority, signal) {
               if (!cal) return { error: "Calendar not available" };
               try {
                 if (!taskId) return { error: "taskId is required" };
@@ -8261,6 +8287,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
                 if (changes.length === 0) return { error: "No changes specified" };
 
+                signal?.throwIfAborted();
                 await calendar.modifyItem(newItem, oldItem);
                 const result = { success: true, updated: changes, task: formatTask(newItem, calendar) };
                 if (newItem.recurrenceInfo) {
@@ -8650,7 +8677,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return {};
             }
 
-            async function updateEvent(eventId, calendarId, title, startDate, endDate, location, description, status, showAs, categories, onlineMeeting, recurrence, recurrenceId, attendees, reminders) {
+            async function updateEvent(eventId, calendarId, title, startDate, endDate, location, description, status, showAs, categories, onlineMeeting, recurrence, recurrenceId, attendees, reminders, signal) {
               if (!cal) return { error: "Calendar not available" };
               try {
                 if (attendees != null) {
@@ -8712,6 +8739,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   // target the whole series and overwrite every occurrence on
                   // the next sync.
                   if (attendees != null) ensureOrganizer(modOcc, calendar);
+                  signal?.throwIfAborted();
                   await calendar.modifyItem(modOcc, occurrence);
                   return { success: true, updated: r.changes, mode: "occurrence", recurrenceId };
                 }
@@ -8742,6 +8770,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 }
 
                 if (attendees != null) ensureOrganizer(newItem, calendar);
+                signal?.throwIfAborted();
                 await calendar.modifyItem(newItem, oldItem);
                 const result = { success: true, updated: changes };
                 // Read the post-update state: after clearing the recurrence
@@ -8756,7 +8785,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               }
             }
 
-            async function deleteEvent(eventId, calendarId, recurrenceId) {
+            async function deleteEvent(eventId, calendarId, recurrenceId, signal) {
               if (!cal) return { error: "Calendar not available" };
               try {
                 if (!eventId) return { error: "eventId is required" };
@@ -8791,12 +8820,14 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                   assertEventWriteAllowed(item, calendar, occurrence);
                   const newItem = item.clone();
                   newItem.recurrenceInfo.removeOccurrenceAt(rid.recDt);
+                  signal?.throwIfAborted();
                   await calendar.modifyItem(newItem, item);
                   return { success: true, deleted: eventId, recurrenceId, mode: "occurrence" };
                 }
 
                 assertEventWriteAllowed(item, calendar);
                 const isRecurring = !!item.recurrenceInfo;
+                signal?.throwIfAborted();
                 await calendar.deleteItem(item);
                 const result = { success: true, deleted: eventId };
                 if (isRecurring) {
@@ -8842,7 +8873,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               return `<html><body><div>${processed.replace(/\n/g, "<br>")}</div></body></html>`;
             }
 
-            async function createTask(title, dueDate, calendarId, description, priority, categories, skipReview) {
+            async function createTask(title, dueDate, calendarId, description, priority, categories, skipReview, signal) {
               if (!cal || !CalTodo) return { error: "Calendar module not available" };
               if (skipReview && isSkipReviewBlocked()) {
                 return { error: "User preference blocks skipReview. Retry with skipReview: false (or omitted) to open the review dialog instead." };
@@ -8898,6 +8929,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                     if (!targetCalendar) return { error: "No writable task-capable calendar found" };
                     todo.calendar = targetCalendar;
                   }
+                  signal?.throwIfAborted();
                   await targetCalendar.addItem(todo);
                   return { success: true, message: `Task "${title}" created in calendar "${targetCalendar.name}"` };
                 }
@@ -8908,6 +8940,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 // Pass the pre-populated CalTodo to the dialog. createTodoWithDialog
                 // clones it (clearing the id) before opening, so all fields are
                 // pre-filled and the user can review or cancel without side effects.
+                signal?.throwIfAborted();
                 win.createTodoWithDialog(targetCalendar, dueDt, null, todo);
 
                 return { success: true, message: `Task dialog opened for "${title}"` };
@@ -15832,17 +15865,18 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             }
 
             // BEGIN TOOL DISPATCH
-            async function callTool(name, args) {
+            async function callTool(name, args, signal) {
+              signal?.throwIfAborted();
               const group = buildTools().find(tool => tool.name === name)?.group;
               if ((group === "calendar" || group === "contacts") &&
                   isPrivacyScopeRestricted(group === "calendar" ? PREF_ALLOW_ALL_CALENDARS : PREF_ALLOW_ALL_ADDRESS_BOOKS)) {
                 const label = group === "calendar" ? "Allow all calendars" : "Allow all address books";
                 return { error: `Account restrictions block this tool. Enable "${label}" in the extension options to grant access.` };
               }
-              return sanitizeToolResultText(await dispatchTool(name, args));
+              return sanitizeToolResultText(await dispatchTool(name, args, signal));
             }
 
-            async function dispatchTool(name, args) {
+            async function dispatchTool(name, args, signal) {
               switch (name) {
                 case "listAccounts":
                   return listAccounts();
@@ -15875,21 +15909,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
                 case "refreshCalendar":
                   return await refreshCalendar(args.calendarId, args.timeoutMs);
                 case "createEvent":
-                  return await createEvent(args.title, args.startDate, args.endDate, args.location, args.description, args.calendarId, args.allDay, args.skipReview, args.status, args.showAs, args.categories, args.onlineMeeting, args.recurrence, args.attendees, args.reminders);
+                  return await createEvent(args.title, args.startDate, args.endDate, args.location, args.description, args.calendarId, args.allDay, args.skipReview, args.status, args.showAs, args.categories, args.onlineMeeting, args.recurrence, args.attendees, args.reminders, signal);
                 case "listEvents":
                   return await listEvents(args.calendarId, args.startDate, args.endDate, args.maxResults);
                 case "updateEvent":
-                  return await updateEvent(args.eventId, args.calendarId, args.title, args.startDate, args.endDate, args.location, args.description, args.status, args.showAs, args.categories, args.onlineMeeting, args.recurrence, args.recurrenceId, args.attendees, args.reminders);
+                  return await updateEvent(args.eventId, args.calendarId, args.title, args.startDate, args.endDate, args.location, args.description, args.status, args.showAs, args.categories, args.onlineMeeting, args.recurrence, args.recurrenceId, args.attendees, args.reminders, signal);
                 case "deleteEvent":
-                  return await deleteEvent(args.eventId, args.calendarId, args.recurrenceId);
+                  return await deleteEvent(args.eventId, args.calendarId, args.recurrenceId, signal);
                 case "listCategories":
                   return listCategories();
                 case "createTask":
-                  return await createTask(args.title, args.dueDate, args.calendarId, args.description, args.priority, args.categories, args.skipReview);
+                  return await createTask(args.title, args.dueDate, args.calendarId, args.description, args.priority, args.categories, args.skipReview, signal);
                 case "listTasks":
                   return await listTasks(args.calendarId, args.completed, args.dueBefore, args.maxResults);
                 case "updateTask":
-                  return await updateTask(args.taskId, args.calendarId, args.title, args.dueDate, args.description, args.completed, args.percentComplete, args.priority);
+                  return await updateTask(args.taskId, args.calendarId, args.title, args.dueDate, args.description, args.completed, args.percentComplete, args.priority, signal);
                 case "sendMail":
                   return await composeMail(args);
                 case "saveDraft":
@@ -15949,6 +15983,66 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
 
             // END TOOL CALL DISPATCH
             // END TOOL DISPATCH
+
+            if (daemonPolicy) {
+              const requested = new Set(daemonPolicy.modules);
+              const modules = [...requested].filter(module => {
+                if (module === "experiment.gloda") return Boolean(GlodaMsgSearcher) &&
+                  Services.prefs.getBoolPref("mailnews.database.global.indexer.enabled", true);
+                if (module === "experiment.calendar") return Boolean(cal && CalEvent && CalTodo);
+                if (module === "experiment.filters") return FILTER_VOCABULARY_AVAILABLE && FILTER_ACTIONS_AVAILABLE;
+                return ["experiment.contacts", "experiment.folders", "experiment.attachments",
+                  "experiment.folder-sync", "experiment.advanced-mail", "experiment.account-setup"].includes(module);
+              });
+              const { getFolder } = ChromeUtils.importESModule("resource:///modules/ExtensionAccounts.sys.mjs");
+              function convertPath(value) {
+                if (!value || /^(imap|mailbox|news|nntp|ews|rss):\/\//i.test(value)) return value;
+                return getFolder(value).folder.URI;
+              }
+              function convertResult(value, key = "") {
+                if (Array.isArray(value)) return value.map(item => convertResult(item, key));
+                if (value && typeof value === "object") {
+                  return Object.fromEntries(Object.entries(value).map(([field, item]) => [field, convertResult(item, field)]));
+                }
+                if (typeof value === "string" && ["folderPath", "path", "parentFolderPath", "newPath", "trashFolderPath",
+                  "searchFolderPaths", "newFolderPath", "moveTo", "copyTo"].includes(key)) {
+                  try {
+                    const found = MailServices.folderLookup.getFolderForURL(value);
+                    if (found && isFolderAccessible(found)) return context.extension.folderManager.convert(found).id;
+                  } catch { /* Non-folder result fields keep their original values. */ }
+                }
+                return value;
+              }
+              daemonDispatcher = async (name, args, signal) => {
+                signal.throwIfAborted();
+                if (name === "openAccountSetup") {
+                  if (!modules.includes("experiment.account-setup")) return { error: "Account setup module is disabled." };
+                  const window = Services.wm.getMostRecentWindow("mail:3pane");
+                  if (!window?.openAccountHub) return { error: "Open the Thunderbird main window first." };
+                  await window.openAccountHub("MAIL");
+                  return { success: true, mode: "review" };
+                }
+                const tool = buildTools().find(item => item.name === name);
+                if (!tool || !isToolEnabled(name)) return { error: "Tool is unavailable or disabled." };
+                const problems = validateToolArgs(name, args);
+                if (problems.length) return { error: problems.join("; ") };
+                const translated = { ...args };
+                for (const field of ["folderPath", "replaceFolderPath", "parentFolderPath", "newParentPath", "moveTo", "copyTo"]) {
+                  if (typeof translated[field] === "string") translated[field] = convertPath(translated[field]);
+                }
+                if (translated.messages) translated.messages = translated.messages.map(ref => ({ ...ref, folderPath: convertPath(ref.folderPath) }));
+                if (translated.searchFolderPaths) translated.searchFolderPaths = translated.searchFolderPaths.map(convertPath);
+                if (translated.actions) translated.actions = translated.actions.map(action =>
+                  ["moveToFolder", "copyToFolder"].includes(action.type) ? { ...action, value: convertPath(action.value) } : action);
+                const result = await callTool(name, translated, signal);
+                const converted = convertResult(result);
+                if (result?.[MCP_EXTRA_CONTENT_BLOCKS]) {
+                  converted.inlineContent = result[MCP_EXTRA_CONTENT_BLOCKS];
+                }
+                return converted;
+              };
+              return { success: true, modules };
+            }
 
             const server = new HttpServer();
 
@@ -16221,6 +16315,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             return { success: false, error: e.toString() };
           }
           })();
+          if (daemonPolicy) return startPromise;
           // Set sentinel BEFORE awaiting to prevent race with concurrent start() calls
           globalThis.__tbMcpStartPromise = startPromise;
           let result;
@@ -16243,6 +16338,80 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
             if (!result?.success && globalThis.__tbMcpStartPromise === startPromise) {
               globalThis.__tbMcpStartPromise = null;
             }
+          }
+        },
+
+        configureDaemon: async function(policy) {
+          for (const controller of daemonRequests.values()) controller.abort();
+          daemonDispatcher = undefined;
+          if (!Array.isArray(policy?.allowedAccounts) || !policy.allowedAccounts.every(id => typeof id === "string") ||
+              !Array.isArray(policy.modules) || !policy.modules.every(name => typeof name === "string")) {
+            return { success: false, error: "Invalid daemon module configuration." };
+          }
+          return api.mcpServer.start(policy);
+        },
+
+        callDaemonTool: async function(name, args, requestId) {
+          if (!daemonDispatcher) return { error: "No optional daemon modules configured." };
+          if (daemonRequests.has(requestId)) return { error: "Request is already running." };
+          const controller = new AbortController();
+          daemonRequests.set(requestId, controller);
+          try {
+            return await daemonDispatcher(name, args, controller.signal);
+          } finally {
+            daemonRequests.delete(requestId);
+          }
+        },
+
+        cancelDaemonTool: async function(requestId) {
+          daemonRequests.get(requestId)?.abort();
+        },
+
+        readDraftFolder: async function(identityId) {
+          const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+          const identity = MailServices.accounts.getIdentity(identityId);
+          const destination = identity?.draftsFolderURI ?? identity?.draftFolder;
+          const uri = typeof destination === "string" ? destination : destination?.URI;
+          if (!uri) return null;
+          const folder = MailServices.folderLookup.getFolderForURL(uri);
+          return folder ? context.extension.folderManager.convert(folder).id : null;
+        },
+
+        readDaemonConnection: async function() {
+          const env = name => Services.env.get(name);
+          const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+          const override = env("TB_CONNECTION_FILE");
+          if (override) {
+            file.initWithPath(override);
+            const name = file.leafName;
+            const suffix = name.lastIndexOf(".");
+            file.leafName = (suffix > 0 ? name.slice(0, suffix) : name) + ".extension.json";
+          } else {
+            const home = Services.dirsvc.get("Home", Ci.nsIFile);
+            if (Services.appinfo.OS === "WINNT") {
+              file.initWithPath(env("LOCALAPPDATA") || Services.dirsvc.get("LocalAppData", Ci.nsIFile).path);
+            } else if (Services.appinfo.OS === "Darwin") {
+              file.initWithPath(home.path);
+              file.append("Library");
+              file.append("Application Support");
+            } else if (env("XDG_RUNTIME_DIR") || env("XDG_DATA_HOME")) {
+              file.initWithPath(env("XDG_RUNTIME_DIR") || env("XDG_DATA_HOME"));
+            } else {
+              file.initWithPath(home.path);
+              file.append(".local");
+              file.append("share");
+            }
+            file.append("tb-agent");
+            file.append("connection.extension.json");
+          }
+          if (!file.exists() || !file.isFile() || file.fileSize > 4096) return null;
+          const input = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(Ci.nsIFileInputStream);
+          input.init(file, 0x01, 0, 0);
+          try {
+            const { NetUtil } = ChromeUtils.importESModule("resource://gre/modules/NetUtil.sys.mjs");
+            return JSON.parse(NetUtil.readInputStreamToString(input, Math.min(input.available(), 4096), { charset: "UTF-8" }));
+          } finally {
+            input.close();
           }
         },
 
@@ -16679,6 +16848,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
         // END LISTEN ALL SETTER
       }
     };
+    return api;
   }
 
   onShutdown(isAppShutdown) {
@@ -16708,18 +16878,21 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
     globalThis.__tbMcpStartPromise = null;
     // END SERVER SHUTDOWN
 
-    // Always clean up the connection info file so stale tokens don't linger
-    // (Inlined because getAPI() helpers are not in scope in onShutdown().)
-    try {
-      const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
-      tmpDir.append("thunderbird-mcp");
-      const connFile = tmpDir.clone();
-      connFile.append("connection.json");
-      if (connFile.exists()) {
-        connFile.remove(false);
+    // The daemon owns its own file. Leave any upstream HTTP connection file alone.
+    if (!this._daemonAddon) {
+      // Always clean up the connection info file so stale tokens don't linger
+      // (Inlined because getAPI() helpers are not in scope in onShutdown().)
+      try {
+        const tmpDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
+        tmpDir.append("thunderbird-mcp");
+        const connFile = tmpDir.clone();
+        connFile.append("connection.json");
+        if (connFile.exists()) {
+          connFile.remove(false);
+        }
+      } catch {
+        // Best-effort cleanup
       }
-    } catch {
-      // Best-effort cleanup
     }
 
     // Always clean up temp attachment files (even on app shutdown) to avoid
