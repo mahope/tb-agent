@@ -304,14 +304,25 @@ export async function dispatchCore(api, op, args, signal, settings) {
       return search(true);
     case "getMessageHeaders":
       return headers(await find(args.messageId, args.folderPath));
-    case "batchGetMessageHeaders":
-      return Promise.all(args.messageIds.map(async id => {
-        try { return await headers(await find(id, args.folderPath)); }
+    case "batchGetMessageHeaders": {
+      const ids = args.messageIds;
+      if (ids.length > 200 || ids.some(id => typeof id !== "string" || !id)) {
+        fail("bad_request", "Supply at most 200 non-empty message IDs.");
+      }
+      if (!ids.length) return { headers: {}, total: 0, failed: 0 };
+      folder(args.folderPath);
+      const collected = new Map();
+      for (const id of new Set(ids)) {
+        signal.throwIfAborted();
+        try { collected.set(id, await headers(await find(id, args.folderPath))); }
         catch (error) {
-          if (error.code !== "not_found") throw error;
-          return { messageId: id, error: error.message };
+          if (signal.aborted) throw error;
+          collected.set(id, { error: error.code === "not_found" ? error.message : "Could not read message headers." });
         }
-      }));
+      }
+      const failed = [...collected.values()].filter(result => result.error).length;
+      return { headers: Object.fromEntries(collected), total: ids.length, failed };
+    }
     case "getMessage":
     case "getMessages": {
       if (args.saveAttachments || args.includeInlineImages) fail("unsupported_op", "This attachment option requires the advanced mail module.");

@@ -48,7 +48,8 @@
     "accountsFolders",
     "compose",
     "storage",
-    "messagesUpdate"
+    "messagesUpdate",
+    "compose.save"
   ],
   "web_accessible_resources": []
 }
