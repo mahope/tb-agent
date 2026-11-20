@@ -111,7 +111,7 @@ impl Hub {
     /// Register the extension. A previous extension connection is closed and its requests fail.
     pub fn attach_extension(&self, conn_id: u64, tx: Tx, mut caps: Capabilities) {
         let mut state = self.lock();
-        let inventory = caps.inventory.take();
+        let inventory = caps.inventory.take().map(|inventory| *inventory);
         let old = state.ext.replace(ExtConn {
             conn_id,
             tx,
@@ -673,6 +673,8 @@ fn empty_result(op: &str, params: &Value) -> Value {
     if matches!(op, "searchMessages" | "getRecentMessages") && params.get("offset").is_some() {
         json!({"messages": [], "totalMatches": 0, "offset": params["offset"],
             "limit": params.get("maxResults").cloned().unwrap_or(json!(50)), "hasMore": false})
+    } else if op == "listFolders" && params["format"] == "table" {
+        json!({"columns": ["accountId", "depth", "isFavorite", "name", "path", "totalMessages", "type", "unreadMessages"], "rows": []})
     } else if params["countOnly"] == true {
         json!({"count": 0})
     } else {

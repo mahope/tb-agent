@@ -62,3 +62,5 @@ jobs:
             exit 1
           fi
           echo "Versions in sync: $PKG"
+      - name: Build extension
+        run: bash scripts/build.sh

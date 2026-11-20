@@ -79,7 +79,7 @@ impl FakeExtension {
                 thunderbird: Some("154.0".into()),
                 extension_version: Some("0.0.0-fake".into()),
                 modules: config.modules.clone(),
-                inventory: Some(inventory()),
+                inventory: Some(Box::new(inventory())),
             }),
         });
         sink.send(Message::text(hello.to_text())).await?;

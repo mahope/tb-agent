@@ -170,3 +170,49 @@ async fn client_token_cannot_register_an_extension() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn undo_refuses_to_overwrite_a_later_change() {
+    let (daemon, _extension) = TestDaemon::with_extension(FakeConfig::default())
+        .await
+        .unwrap();
+    let client = Client::connect(daemon.info(), "undo test").await.unwrap();
+    let id = "m1@example.com";
+    let original = client
+        .request(
+            "updateMessage",
+            json!({
+                "messageId": id, "folderPath": INBOX, "read": true
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    client
+        .request(
+            "updateMessage",
+            json!({
+                "messageId": id, "folderPath": INBOX, "flagged": true
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let err = client
+        .request("undo", json!({"auditId": original["auditId"]}), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_body().code, "conflict");
+    let current = client
+        .request(
+            "getMessageHeaders",
+            json!({
+                "messageId": id, "folderPath": INBOX
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(current["read"], true);
+    assert_eq!(current["flagged"], true);
+}

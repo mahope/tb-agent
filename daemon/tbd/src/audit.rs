@@ -65,6 +65,7 @@ pub struct Undo {
 
 pub struct Audit {
     file: File,
+    _lock: File,
     intents: HashMap<String, WriteIntent>,
     completed: HashMap<String, Undo>,
     failed: bool,
@@ -75,25 +76,24 @@ impl Audit {
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
+        // Lock a sidecar so the JSONL remains readable on Windows while the daemon runs.
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let mut lock_options = OpenOptions::new();
+        lock_options
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false);
+        let lock = open_private(&mut lock_options, Path::new(&lock_path))?;
+        lock.try_lock()
+            .with_context(|| format!("lock audit log {}", path.display()))?;
         let mut options = OpenOptions::new();
         options.read(true).append(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(path)
-            .with_context(|| format!("open audit log {}", path.display()))?;
-        file.try_lock()
-            .with_context(|| format!("lock audit log {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
+        let file = open_private(&mut options, path)?;
         let mut audit = Self {
             file,
+            _lock: lock,
             intents: HashMap::new(),
             completed: HashMap::new(),
             failed: false,
@@ -194,6 +194,23 @@ impl Audit {
     }
 }
 
+fn open_private(options: &mut OpenOptions, path: &Path) -> Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -201,4 +218,61 @@ fn now() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replays_confirmed_writes_and_persists_undo_claims() {
+        let dir = std::env::temp_dir().join(format!("tb-audit-{}", new_token()));
+        let path = dir.join("audit.jsonl");
+        let mut previous = MessageState {
+            message_id: "message@example.com".into(),
+            folder_path: "inbox".into(),
+            read: false,
+            flagged: false,
+            tags: BTreeSet::new(),
+        };
+        let mut audit = Audit::open(&path).unwrap();
+        assert!(Audit::open(&path).is_err());
+        let intent = WriteIntent {
+            accounts: ["account1".to_owned()].into(),
+            operation: "updateMessage".into(),
+            permissions: [Permission::Tag].into(),
+            message_ids: vec![previous.message_id.clone()],
+            previous: vec![previous.clone()],
+            reversible: true,
+            undo_of: None,
+        };
+        let confirmed = audit.begin(intent.clone()).unwrap();
+        let unresolved = audit.begin(intent).unwrap();
+        previous.read = true;
+        audit
+            .finish(confirmed.clone(), true, vec![previous], None)
+            .unwrap();
+        drop(audit);
+
+        let mut audit = Audit::open(&path).unwrap();
+        assert!(audit.undo(&unresolved).is_none());
+        let undo = audit.undo(&confirmed).unwrap();
+        assert!(!undo.write.previous[0].read);
+        assert!(undo.after[0].read);
+        audit
+            .begin(WriteIntent {
+                operation: "undo".into(),
+                previous: undo.after,
+                reversible: false,
+                undo_of: Some(confirmed.clone()),
+                ..undo.write
+            })
+            .unwrap();
+        drop(audit);
+
+        let audit = Audit::open(&path).unwrap();
+        assert!(audit.undo(&confirmed).is_none());
+        drop(audit);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

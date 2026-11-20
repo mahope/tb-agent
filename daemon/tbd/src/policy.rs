@@ -418,6 +418,26 @@ impl Scope {
             )
         };
         match result {
+            Value::Object(fields) if op == "listFolders" => {
+                let Some(columns) = fields.get("columns").and_then(Value::as_array) else {
+                    return Value::Null;
+                };
+                let Some(index) = columns.iter().position(|column| column == "accountId") else {
+                    return Value::Null;
+                };
+                let Some(rows) = fields.get("rows").and_then(Value::as_array) else {
+                    return Value::Null;
+                };
+                let rows: Vec<_> = rows
+                    .iter()
+                    .filter(|row| {
+                        row.get(index)
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| self.accounts.contains(id))
+                    })
+                    .collect();
+                json!({"columns": columns, "rows": rows})
+            }
             Value::Array(items) => project_list(items),
             Value::Object(mut fields) if matches!(op, "searchMessages" | "getRecentMessages") => {
                 fields.retain(|key, _| {

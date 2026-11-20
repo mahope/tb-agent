@@ -6,9 +6,9 @@ small local daemon, a `tb` command line and an MCP server in front of it, so the
 login to manage and no mail credentials ever leave Thunderbird.
 
 > **Status:** early development. The daemon, CLI and MCP server (issue #1) are in place and are
-> tested against a fake extension. The extension side of the new protocol is the next step, so
-> until then the upstream extension and bridge described further down are what talk to
-> Thunderbird.
+> tested against a fake extension, including account policy, auditing and undo. The
+> Thunderbird WebExtension connector for this protocol is still pending. The upstream
+> extension and bridge described below run independently of the daemon and its policy.
 
 ## A fork of thunderbird-mcp
 
@@ -69,6 +69,7 @@ sleep 1
 ./target/debug/tb accounts
 ./target/debug/tb search report
 ./target/debug/tb get m1@example.com --folder imap://work@mail.example.com/INBOX
+# The default policy returns headers. Grant full + read to account1 to read its body.
 ```
 
 Exit codes of `tb`: `0` success, `1` the operation failed (error JSON on stderr), `2` usage
@@ -107,8 +108,38 @@ needed in CI. CLI output is covered by snapshot tests (`insta`).
 - Message content returned to agents is untrusted data. Sending still opens a compose window
   for review unless the user has allowed direct sending in the extension.
 
-Per-account permissions, a local audit log with undo, and extension changes are tracked as
-separate issues.
+### Account policy and undo
+
+Put `policy.toml` in the platform configuration directory under `tb-agent`
+(`~/.config/tb-agent/policy.toml` by default on Linux). You can also pass
+`tbd --policy-file /path/to/policy.toml` or set `TB_POLICY_FILE`. Restart the daemon when
+the file changes. Use Thunderbird account IDs from `tb accounts`.
+
+```toml
+[accounts.account1]
+access = "full"
+permissions = ["read", "move", "tag", "trash", "send"]
+
+[accounts.account2]
+access = "off"
+permissions = []
+```
+
+Unlisted accounts have `headers` access with `read`. Header results carry the message ID,
+sender, subject, date, folder, read and flagged status, and tags. `headers` grants only
+read access. `off` disables access. `full` enables the explicitly listed permissions.
+`move` covers move and copy, `tag` covers tags and read/flagged changes, `trash`
+covers trash and deletion, and `send` covers compose, send, draft, reply and forward.
+`filters`, `rules` and `accounts` are accepted for future operations.
+
+Writes go to the local JSONL audit log under the platform local data directory
+(`~/.local/share/tb-agent/audit.jsonl` by default on Linux). Override it with
+`--audit-file` or `TB_AUDIT_FILE`. A successful write returns an `auditId`.
+Use `tb undo <audit-id>` to restore the previous folder and flags after a move,
+tag, mark or trash operation. Undo checks the current policy and restores only
+messages that still match the state recorded after the write. Keep the audit log
+and its lock file private. See the protocol for timeout and undo behavior.
+[Daemon protocol](docs/protocol.md#account-policy).
 
 ---
 

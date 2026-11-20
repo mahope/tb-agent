@@ -48,7 +48,7 @@ pub struct Capabilities {
     pub modules: Vec<String>,
     /// Private routing inventory, supplied only by the authenticated extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inventory: Option<Inventory>,
+    pub inventory: Option<Box<Inventory>>,
 }
 
 /// Exact Thunderbird resource ownership for one extension connection.
