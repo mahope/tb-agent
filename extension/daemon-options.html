@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tb-agent settings</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: menu; max-width: 44rem; margin: 1.5rem; }
+    fieldset { margin-block: 1rem; }
+    label { display: block; padding-block: .25rem; }
+    button { margin-block: .5rem; }
+  </style>
+</head>
+<body>
+  <h1>tb-agent settings</h1>
+  <p id="connection-status" role="status"></p>
+  <fieldset>
+    <legend>Daemon connection</legend>
+    <label>Import the connection.json file written by tbd
+      <input type="file" id="connection" accept=".json,application/json">
+    </label>
+    <button type="button" id="clear">Clear imported connection</button>
+  </fieldset>
+  <form id="access">
+    <fieldset>
+      <legend>Accounts available to tb and MCP</legend>
+      <div id="accounts"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Mail permissions</legend>
+      <label><input type="checkbox" id="allowDirectSend"> Allow direct sends when explicitly requested</label>
+      <label><input type="checkbox" id="allowEncrypted"> Allow reading encrypted message content</label>
+    </fieldset>
+    <fieldset id="experiments" hidden>
+      <legend>Optional integrations</legend>
+      <label><input type="checkbox" name="module" value="experiment.gloda"> Gloda body search</label>
+      <label><input type="checkbox" name="module" value="experiment.attachments"> Search attachment metadata</label>
+      <label><input type="checkbox" name="module" value="experiment.folder-sync"> Refresh folders</label>
+      <label><input type="checkbox" name="module" value="experiment.folders"> Manage folders and empty Trash or Junk</label>
+      <label><input type="checkbox" name="module" value="experiment.filters"> Manage Thunderbird filters</label>
+      <label><input type="checkbox" name="module" value="experiment.calendar"> Access all calendars</label>
+      <label><input type="checkbox" name="module" value="experiment.contacts"> Access all address books</label>
+      <label><input type="checkbox" id="allowContactWrites"> Allow editing contacts</label>
+      <label><input type="checkbox" name="module" value="experiment.advanced-mail"> Advanced drafts and local attachment paths</label>
+      <label><input type="checkbox" name="module" value="experiment.account-setup"> Open Thunderbird's account setup window</label>
+    </fieldset>
+    <button type="submit">Save permissions</button>
+  </form>
+  <p id="feedback" role="status"></p>
+  <script type="module" src="daemon-options.mjs"></script>
+</body>
+</html>

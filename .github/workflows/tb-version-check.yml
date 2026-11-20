@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        channel: [stable, beta, esr]
+        channel: [stable, beta]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -138,7 +138,6 @@ jobs:
           case "$TB_CHANNEL" in
             stable) version_key="LATEST_THUNDERBIRD_VERSION" ;;
             beta) version_key="LATEST_THUNDERBIRD_DEVEL_VERSION" ;;
-            esr) version_key="THUNDERBIRD_ESR" ;;
             *) fail_infra "unsupported Thunderbird channel: ${TB_CHANNEL}" ;;
           esac
 
@@ -177,7 +176,7 @@ jobs:
 
           profile_dir="$(mktemp -d)" || fail_infra "failed to create test profile"
           mkdir -p "$profile_dir/extensions" || fail_infra "failed to create extension profile directory"
-          cp dist/thunderbird-mcp.xpi "$profile_dir/extensions/thunderbird-mcp@tkasperczyk.dev.xpi" \
+          cp dist/thunderbird-mcp.xpi "$profile_dir/extensions/tb-agent@mahoje.dk.xpi" \
             || fail_infra "failed to install XPI into test profile"
           cat > "$profile_dir/user.js" <<'PREFS'
           user_pref("extensions.experiments.enabled", true);
@@ -194,7 +193,7 @@ jobs:
           read_addon_state() {
             EXT_JSON="$ext_json" node <<'NODE'
           const fs = require('fs');
-          const addonId = 'thunderbird-mcp@tkasperczyk.dev';
+          const addonId = 'tb-agent@mahoje.dk';
 
           function done(result) {
             process.stdout.write(JSON.stringify(result));
@@ -347,7 +346,7 @@ jobs:
           const fs = require('fs');
           const path = require('path');
 
-          const expectedChannels = ['stable', 'beta', 'esr'];
+          const expectedChannels = ['stable', 'beta'];
           const resultsDir = process.env.RESULTS_DIR;
           const issueBodyFile = process.env.ISSUE_BODY_FILE;
           const runUrl = process.env.RUN_URL;

@@ -4,7 +4,7 @@ Keep changes focused and follow the surrounding code. Search for existing helper
 
 ## Build
 
-Use Node.js 22 or newer for development. On Linux/macOS, run `bash scripts/build.sh` (requires `zip`). Alternatively, including on Windows, run `node scripts/build-xpi.cjs`. Both produce `dist/thunderbird-mcp.xpi`. Install it from Thunderbird's Add-ons manager and restart Thunderbird to load the changes.
+Use Node.js 22 or newer for development. On Linux/macOS, run `bash scripts/build.sh` (requires `zip`). Alternatively, including on Windows, run `node scripts/build-xpi.cjs`. Both produce the full `dist/thunderbird-mcp.xpi`. Run `node scripts/build-xpi.cjs --core` to build `dist/tb-agent-core.xpi` without Experiments. See the [upstream merge workflow](README.md#upstream). Install it from Thunderbird's Add-ons manager and restart Thunderbird to load the changes.
 
 ## Test and lint
 

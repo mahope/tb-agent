@@ -89,10 +89,18 @@ export async function dispatchCore(api, op, args, signal, settings) {
   if (!Array.isArray(allowed) || !allowed.every(id => typeof id === "string")) {
     fail("access_denied", "Choose the accounts to expose in tb-agent settings.");
   }
-  const accessible = (await accounts.list(true)).filter(account => allowed.includes(account.id));
+  const allAccounts = await accounts.list(true);
+  const accessible = allAccounts.filter(account => allowed.includes(account.id));
   const tree = accessible.flatMap(account => account.rootFolder ? flatten(account.rootFolder) : []);
   const byId = new Map(tree.map(folder => [folder.id, folder]));
   const special = (folder, type) => folder.specialUse?.includes(type);
+  const whollyAllowed = allAccounts.every(account => allowed.includes(account.id));
+
+  function inScope(candidate, parent, includeChildren = true) {
+    return candidate.accountId === parent.accountId &&
+      (candidate.id === parent.id ||
+        (includeChildren && candidate.path.startsWith(parent.path.replace(/\/$/, "") + "/")));
+  }
 
   function folder(id, root = false) {
     const result = byId.get(id);
@@ -120,14 +128,27 @@ export async function dispatchCore(api, op, args, signal, settings) {
     if (typeof id !== "string" || !id) fail("bad_request", "A message ID is required.");
     const source = folder(path);
     const query = id.replace(/^<|>$/g, "");
-    if (/^tb:\d+$/.test(query)) {
-      const message = await messages.get(Number(query.slice(3))).catch(() => undefined);
-      if (message?.folder?.id === source.id && !message.external) return message;
-    }
     for await (const message of pages(await messages.query({ folderId: source.id, headerMessageId: query }))) {
       if (message.folder.id === source.id && message.headerMessageId === query) return message;
     }
+    if (/^tb:\d+$/.test(query)) {
+      const message = await messages.get(Number(query.slice(3))).catch(() => undefined);
+      if (message?.folder?.id === source.id && !message.external && !message.headerMessageId) return message;
+    }
     fail("not_found", "Message is unavailable in that folder.");
+  }
+
+  async function headers(message) {
+    const raw = await messages.getHeaders(message.id);
+    const references = text(raw.references?.join(" "));
+    const reply = raw["in-reply-to"]?.join(" ") ?? references;
+    const ancestors = (references.match(/<[^<>\s]+>/g) ?? []).map(id => id.slice(1, -1));
+    const inReplyTo = text(reply.match(/<[^<>\s]+>/g)?.at(-1)?.slice(1, -1));
+    const output = { ...summarize(message), references, inReplyTo, size: message.size };
+    // Use the stored outer Subject instead of an index that may contain a decrypted subject.
+    if (settings.allowEncrypted !== true) output.subject = text(raw.subject?.[0]);
+    if (ancestors.length) output.threadId = ancestors[0];
+    return output;
   }
 
   async function read(message, options) {
@@ -152,13 +173,8 @@ export async function dispatchCore(api, op, args, signal, settings) {
 
   async function search(recent) {
     const from = args.folderPath ? folder(args.folderPath, true) : null;
-    function inScope(candidate, parent) {
-      return candidate.accountId === parent.accountId &&
-        (candidate.id === parent.id || ((args.includeSubfolders !== false) &&
-          candidate.path.startsWith(parent.path.replace(/\/$/, "") + "/")));
-    }
     const roots = from ? [from] : recent ? tree.filter(item => special(item, "inbox")) : null;
-    const ids = tree.filter(item => !item.isRoot && (!roots || roots.some(root => inScope(item, root)))).map(item => item.id);
+    const ids = tree.filter(item => !item.isRoot && (!roots || roots.some(root => inScope(item, root, args.includeSubfolders !== false)))).map(item => item.id);
     const query = {};
     if (recent) query.fromDate = new Date(Date.now() - bound(args.daysBack, 7, 36500) * 86_400_000);
     if (args.startDate) query.fromDate = date(args.startDate);
@@ -187,22 +203,29 @@ export async function dispatchCore(api, op, args, signal, settings) {
     const size = bound(args.maxResults, 50, 200);
     const rows = results.slice(offset, offset + size).map(message => summarize(message, args.fullRecipients === true));
     if (args.countOnly) return { count: results.length };
-    if (args.offset !== undefined) return { messages: rows, totalMatches: results.length, offset, hasMore: offset + size < results.length };
+    if (args.offset !== undefined) return { messages: rows, totalMatches: results.length, offset, limit: size, hasMore: offset + size < results.length };
     return rows;
   }
 
   async function composeMessage(source) {
-    if (args.skipReview === true && settings.allowDirectSend !== true) {
-      fail("access_denied", "Direct sending is blocked. Omit skipReview to open a compose window.");
-    }
+    if (args.skipReview === true) fail("unsupported_op", "Direct sending requires the advanced mail module.");
     if (args.sendAt || args.inReplyTo || args.references || args.includeSignature === false) {
       fail("unsupported_op", "This compose option requires the advanced mail module.");
     }
     const isDraft = op === "saveDraft" || (op === "replyToMessage" && args.saveAsDraft === true);
+    // saveMessage uses the identity's configured draft destination. MailExtensions
+    // cannot inspect or override it ahead of time.
+    if (isDraft && !whollyAllowed) fail("draft_destination_unavailable", "Saving drafts with restricted accounts requires the advanced mail module.");
+    if (isDraft && source && isProtected(await messages.getFull(source.id, { decrypt: false }))) {
+      fail("access_denied", "Open a review window for a protected original.");
+    }
     let replacement;
+    let replacementTrash;
     if (args.replaceMessageId !== undefined || args.replaceFolderPath !== undefined) {
       replacement = await find(args.replaceMessageId, args.replaceFolderPath);
       if (!special(folder(replacement.folder.id), "drafts")) fail("bad_request", "Only drafts can be replaced.");
+      replacementTrash = tree.find(item => item.accountId === replacement.folder.accountId && special(item, "trash"));
+      if (!replacementTrash) fail("bad_request", "No separate Trash folder is available for the original draft.");
     }
     const preferred = source ? accessible.find(account => account.id === source.folder.accountId) : await accounts.getDefault(false);
     const identities = accessible.flatMap(account => account.identities);
@@ -235,23 +258,18 @@ export async function dispatchCore(api, op, args, signal, settings) {
     if (op === "replyToMessage") tab = await compose.beginReply(source.id, args.replyAll ? "replyToAll" : "replyToSender", details);
     else if (op === "forwardMessage") tab = await compose.beginForward(source.id, "forwardInline", details);
     else tab = await compose.beginNew(details);
-    if (!isDraft && !args.skipReview) return { success: true, mode: "review" };
+    if (!isDraft) return { success: true, mode: "review" };
     try {
       signal.throwIfAborted();
-      if (isDraft) {
-        const saved = (await compose.saveMessage(tab.id, { mode: "draft" })).messages[0];
-        if (!saved || !byId.has(saved.folder?.id)) fail("operation_failed", "Draft was saved outside the allowed folders. Check the identity's Copies & Folders settings.");
-        if (replacement && replacement.id !== saved.id) {
-          const trash = tree.find(item => item.accountId === replacement.folder.accountId && special(item, "trash"));
-          if (!trash) fail("operation_failed", "New draft saved, but the original could not be moved to Trash.");
-          await messages.move([replacement.id], trash.id);
-        }
-        return { success: true, messageId: summarize(saved).id, folderPath: saved.folder.id };
+      const saved = (await compose.saveMessage(tab.id, { mode: "draft" })).messages[0];
+      if (!saved || !byId.has(saved.folder?.id)) fail("operation_failed", "Check the identity's Copies & Folders settings for the saved draft.");
+      if (replacement && replacement.id !== saved.id) {
+        signal.throwIfAborted();
+        await messages.move([replacement.id], replacementTrash.id);
       }
-      await compose.sendMessage(tab.id, { mode: "sendNow" });
-      return { success: true, mode: "direct" };
+      return { success: true, messageId: summarize(saved).id, folderPath: saved.folder.id };
     } finally {
-      if (isDraft || signal.aborted) await tabs.remove(tab.id).catch(() => {});
+      await tabs.remove(tab.id).catch(() => {});
     }
   }
 
@@ -268,12 +286,13 @@ export async function dispatchCore(api, op, args, signal, settings) {
     case "listFolders": {
       const parent = args.folderPath && folder(args.folderPath, true);
       const selected = tree.filter(item => !item.isRoot && (!args.accountId || item.accountId === args.accountId) &&
-        (!parent || (item.accountId === parent.accountId && (item.id === parent.id ||
-          item.path.startsWith(parent.path.replace(/\/$/, "") + "/")))) && (!args.favoritesOnly || item.isFavorite));
+        (!parent || inScope(item, parent)) && (!args.favoritesOnly || item.isFavorite));
       const rows = await Promise.all(selected.map(async item => {
-        const info = await folders.getFolderInfo(item.id);
-        return { name: text(item.name), path: item.id, type: item.specialUse?.[0] ?? "folder",
-          accountId: item.accountId, totalMessages: info.totalMessageCount, unreadMessages: info.unreadMessageCount,
+        const info = await folders.getFolderInfo(item.id).catch(() => null);
+        const role = item.specialUse?.[0];
+        const type = role === "archives" ? "archive" : role === "outbox" ? "queue" : role ?? "folder";
+        return { name: text(item.name), path: item.id, type,
+          accountId: item.accountId, totalMessages: info?.totalMessageCount ?? null, unreadMessages: info?.unreadMessageCount ?? null,
           depth: parent ? item.depth - parent.depth : item.depth, isFavorite: item.isFavorite };
       }));
       return args.format === "table" ? { columns: FOLDER_COLUMNS, rows: rows.map(row => FOLDER_COLUMNS.map(key => row[key])) } : rows;
@@ -284,10 +303,10 @@ export async function dispatchCore(api, op, args, signal, settings) {
     case "getRecentMessages":
       return search(true);
     case "getMessageHeaders":
-      return summarize(await find(args.messageId, args.folderPath));
+      return headers(await find(args.messageId, args.folderPath));
     case "batchGetMessageHeaders":
       return Promise.all(args.messageIds.map(async id => {
-        try { return summarize(await find(id, args.folderPath)); }
+        try { return await headers(await find(id, args.folderPath)); }
         catch (error) {
           if (error.code !== "not_found") throw error;
           return { messageId: id, error: error.message };
@@ -307,7 +326,8 @@ export async function dispatchCore(api, op, args, signal, settings) {
           results.push({ index, messageId: ref.messageId, folderPath: ref.folderPath, error: error.message });
         }
       }
-      return results;
+      const succeeded = results.filter(result => !result.error).length;
+      return { messages: results, requested: results.length, succeeded, failed: results.length - succeeded, max: 20 };
     }
     case "displayMessage": {
       const message = await find(args.messageId, args.folderPath);
@@ -321,7 +341,9 @@ export async function dispatchCore(api, op, args, signal, settings) {
       if (!Array.isArray(refs) || !refs.length || refs.length > 200) fail("bad_request", "Supply 1–200 message IDs.");
       const source = folder(args.folderPath);
       const trash = args.trash || op === "deleteMessages";
-      if (trash && (args.moveTo || args.copyTo)) fail("bad_request", "Trash cannot be combined with move or copy.");
+      if ((trash && (args.moveTo || args.copyTo)) || (args.moveTo && args.copyTo)) {
+        fail("bad_request", "Move, copy and trash are mutually exclusive.");
+      }
       const move = trash ? tree.find(item => item.accountId === source.accountId && special(item, "trash")) :
         args.moveTo ? folder(args.moveTo) : null;
       const copy = args.copyTo ? folder(args.copyTo) : null;

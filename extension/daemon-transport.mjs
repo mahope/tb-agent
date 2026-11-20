@@ -2,10 +2,13 @@ const CHUNK_SIZE = 64 * 1024;
 const MAX_RESULT = 256 * 1024 * 1024;
 
 export function connectionInfo(value) {
-  if (value?.protocol !== 1 || value.host !== "127.0.0.1" ||
+  const host = value?.host;
+  const loopback = typeof host === "string" && (host === "::1" ||
+    (/^127(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(host) && host.split(".").every(octet => Number(octet) <= 255)));
+  if (value?.protocol !== 1 || !loopback ||
       !Number.isInteger(value.port) || value.port < 1 || value.port > 65535 ||
       typeof value.token !== "string" || !/^[0-9a-f]{64}$/.test(value.token)) {
-    throw new Error("Select a valid tbd protocol v1 connection file for 127.0.0.1.");
+    throw new Error("Select a valid tbd protocol v1 connection file with a loopback address.");
   }
   return { protocol: 1, host: value.host, port: value.port, token: value.token };
 }
@@ -19,6 +22,7 @@ export class ToolError extends Error {
 
 export function connectDaemon({ readConnection, capabilities, dispatch, setStatus }) {
   let socket;
+  let cancelRequests;
   let retry;
   let generation = 0;
   let delay = 500;
@@ -26,6 +30,7 @@ export function connectDaemon({ readConnection, capabilities, dispatch, setStatu
   function reconnect() {
     const current = ++generation;
     clearTimeout(retry);
+    cancelRequests?.();
     socket?.close(1000);
     socket = undefined;
     delay = 500;
@@ -53,7 +58,8 @@ export function connectDaemon({ readConnection, capabilities, dispatch, setStatu
       info = connectionInfo(config);
       advertised = await capabilities();
       if (current !== generation) return;
-      ws = new WebSocket(`ws://127.0.0.1:${info.port}/ws`, `tb.token.${info.token}`);
+      const host = info.host === "::1" ? "[::1]" : info.host;
+      ws = new WebSocket(`ws://${host}:${info.port}/ws`, `tb.token.${info.token}`);
     } catch {
       schedule(current);
       return;
@@ -64,6 +70,10 @@ export function connectDaemon({ readConnection, capabilities, dispatch, setStatu
     let ready = false;
     let lastPong = 0;
     const requests = new Map();
+    function abortRequests() {
+      for (const request of requests.values()) request.abort();
+    }
+    cancelRequests = abortRequests;
     const handshake = setTimeout(() => ws.close(4000), 10_000);
     const heartbeat = setInterval(() => {
       if (!ready) return;
@@ -142,7 +152,7 @@ export function connectDaemon({ readConnection, capabilities, dispatch, setStatu
       }
     };
     ws.onclose = event => {
-      for (const request of requests.values()) request.abort();
+      abortRequests();
       clearTimeout(handshake);
       clearInterval(heartbeat);
       if (current !== generation) return;

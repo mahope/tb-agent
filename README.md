@@ -5,22 +5,61 @@ Thunderbird. Thunderbird keeps owning logins, OAuth, IMAP, Exchange and Graph. t
 small local daemon, a `tb` command line and an MCP server in front of it, so there is only one
 login to manage and no mail credentials ever leave Thunderbird.
 
-> **Status:** early development. The daemon, CLI and MCP server (issue #1) are in place and are
-> tested against a fake extension. The extension side of the new protocol is the next step, so
-> until then the upstream extension and bridge described further down are what talk to
-> Thunderbird.
+The extension requires **Thunderbird Release 154 or later**.
 
-## A fork of thunderbird-mcp
+## Try it with Thunderbird
 
-tb-agent is a fork of **[TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp)**
-by Tomasz Kasperczyk, and it would not exist without that work. The Thunderbird extension, its
-49 tools and the mail logic behind them are upstream's, and they stay in this repository under
-`extension/` with upstream's history. Upstream is kept as a git remote so improvements can be
-merged. The original MIT license and copyright notice are kept in [LICENSE](LICENSE); new code
-in this repository is released under the same license. The original README follows below the
-tb-agent section.
+1. Build the daemon and extension from the repository root.
 
-What is new here is the Rust daemon in `daemon/` and the changes that come with it.
+   ```bash
+   cargo build --manifest-path daemon/Cargo.toml --workspace --locked
+   node scripts/build-xpi.cjs --core
+   ```
+
+2. In Thunderbird, open Add-ons Manager and install `dist/tb-agent-core.xpi` from
+   its gear menu. Start `daemon/target/debug/tbd` in a terminal.
+3. Open **tb-agent → Options** in Add-ons Manager. Import the `connection.json`
+   file at the path printed by `tbd`, select the accounts clients may access,
+   and save permissions. No accounts are exposed until selected.
+4. In another terminal, run:
+
+   ```bash
+   daemon/target/debug/tb status
+   daemon/target/debug/tb accounts
+   daemon/target/debug/tb search report
+   ```
+
+The core XPI reconnects with backoff using the imported connection. Import the
+new file after `tbd` restarts because the port and token can change. If you set
+a custom `TB_CONNECTION_FILE`, use the same path for `tbd` and `tb`.
+
+The full package (`node scripts/build-xpi.cjs`, output `dist/thunderbird-mcp.xpi`)
+supports automatic file discovery when Thunderbird allows Experiments. It also
+offers the optional modules in [docs/experiments.md](docs/experiments.md).
+If Thunderbird requires it for installing the full package, enable
+`extensions.experiments.enabled` in Thunderbird's Config Editor. Its
+**Options** page lets you opt into individual modules. An imported file
+overrides discovery. Clear it to return to automatic discovery.
+
+## Upstream
+
+tb-agent is a fork of [TKasperczyk/thunderbird-mcp](https://github.com/TKasperczyk/thunderbird-mcp)
+by Tomasz Kasperczyk. The original MIT copyright notice remains in [LICENSE](LICENSE).
+The optional integrations retain upstream mail logic and its tests. To bring
+in changes, add the `upstream` remote once per clone and merge on a branch
+based on this fork's `main`:
+
+```bash
+git remote add upstream https://github.com/TKasperczyk/thunderbird-mcp.git
+git fetch upstream
+git switch -c merge-upstream origin/main
+git merge upstream/main
+```
+
+Resolve changes to the Experiment handlers, refresh the corresponding
+schemas in `daemon/protocol/ops.json` when upstream tool inputs change, and
+run the verification commands below. Keep the tb-agent manifest, startup
+page and WebSocket transport when integrating changes.
 
 ## Architecture
 
@@ -91,6 +130,10 @@ cd daemon
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
+cd ..
+npm test
+node scripts/build-xpi.cjs
+node scripts/build-xpi.cjs --core
 ```
 
 The contract tests start the daemon and a fake extension in-process, so no Thunderbird is
@@ -107,12 +150,13 @@ needed in CI. CLI output is covered by snapshot tests (`insta`).
 - Message content returned to agents is untrusted data. Sending still opens a compose window
   for review unless the user has allowed direct sending in the extension.
 
-Per-account permissions, a local audit log with undo, and extension changes are tracked as
-separate issues.
+The extension enforces the account allowlist for source folders, destination folders and sending identities. Direct sending requires both the user opt-in and the advanced mail module. A local audit log with undo is tracked separately.
 
 ---
 
 # Thunderbird MCP (upstream README)
+
+The sections below describe upstream Thunderbird MCP and its HTTP bridge. For this fork, use the daemon setup above.
 
 [![CI](https://github.com/TKasperczyk/thunderbird-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/TKasperczyk/thunderbird-mcp/actions/workflows/ci.yml)
 [![Tools](https://img.shields.io/badge/49_Tools-email%2C_compose%2C_filters%2C_calendar%2C_contacts-blue.svg)](#what-you-can-do)
