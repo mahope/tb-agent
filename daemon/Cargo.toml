@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["protocol", "client", "tbd", "tb", "mcp", "testkit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/mahope/tb-agent"
+rust-version = "1.90"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0"
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+dirs = "7"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rand = "0.10"
+rmcp = { version = "3.10", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-std", "io-util", "signal"] }
+tokio-tungstenite = "0.30"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+tb-protocol = { path = "protocol" }
+tb-client = { path = "client" }
+tb-mcp = { path = "mcp" }
+tb-testkit = { path = "testkit" }
+tbd = { path = "tbd" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
