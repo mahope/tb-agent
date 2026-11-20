@@ -1,0 +1,37 @@
+[package]
+name = "tbd"
+description = "tb-agent daemon: WebSocket hub between the Thunderbird extension and agent clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tbd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tbd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+serde_json.workspace = true
+tb-protocol.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tb-client.workspace = true
+tb-testkit.workspace = true
+tokio-tungstenite.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,8 @@
+---
+source: tb/tests/cli.rs
+expression: "env.tb(&[\"delete\", \"m1@example.com\", \"--folder\", INBOX]).await.json()"
+---
+{
+  "deleted": 1,
+  "success": true
+}

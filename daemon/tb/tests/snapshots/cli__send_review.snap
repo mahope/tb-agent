@@ -1,0 +1,8 @@
+---
+source: tb/tests/cli.rs
+expression: "env.tb(&[\"send\", \"--to\", \"a@example.com\", \"--subject\", \"Hi\", \"--body\",\n\"Text\"]).await.json()"
+---
+{
+  "mode": "review",
+  "success": true
+}

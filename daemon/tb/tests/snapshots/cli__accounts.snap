@@ -1,0 +1,30 @@
+---
+source: tb/tests/cli.rs
+expression: out.json()
+---
+[
+  {
+    "id": "account1",
+    "identities": [
+      {
+        "email": "mads@example.com",
+        "id": "id1",
+        "name": "Mads"
+      }
+    ],
+    "name": "Work",
+    "type": "imap"
+  },
+  {
+    "id": "account2",
+    "identities": [
+      {
+        "email": "me@home.example.net",
+        "id": "id2",
+        "name": "Mads"
+      }
+    ],
+    "name": "Personal",
+    "type": "imap"
+  }
+]

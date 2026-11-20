@@ -1,0 +1,8 @@
+---
+source: tb/tests/cli.rs
+expression: out.json()
+---
+{
+  "success": true,
+  "updated": 1
+}

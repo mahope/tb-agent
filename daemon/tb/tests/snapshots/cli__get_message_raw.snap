@@ -1,0 +1,8 @@
+---
+source: tb/tests/cli.rs
+expression: raw
+---
+{
+  "id": "m2@example.com",
+  "rawSource": "Subject: Lunch on Friday?\r\n\r\nbody\r\n"
+}

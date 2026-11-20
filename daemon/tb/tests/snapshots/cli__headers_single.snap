@@ -1,0 +1,19 @@
+---
+source: tb/tests/cli.rs
+expression: "env.tb(&[\"headers\", \"m3@example.com\", \"--folder\",\nPERSONAL_INBOX]).await.json()"
+---
+{
+  "author": "Billing <billing@example.org>",
+  "ccList": [],
+  "date": "2026-11-16T08:15:00.000Z",
+  "flagged": false,
+  "folderPath": "imap://me@home.example.net/INBOX",
+  "id": "m3@example.com",
+  "read": false,
+  "recipients": [
+    "mads@example.com"
+  ],
+  "subject": "Invoice 2026-11",
+  "tags": [],
+  "threadId": "m3@example.com"
+}
