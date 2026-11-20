@@ -29,7 +29,10 @@ async fn main() -> Result<()> {
         config.modules.push("experiment.folder-sync".into());
     }
     let _extension = FakeExtension::connect(&info, config).await?;
-    eprintln!("fake extension connected to ws://{}:{}", info.host, info.port);
+    eprintln!(
+        "fake extension connected to ws://{}:{}",
+        info.host, info.port
+    );
     tokio::signal::ctrl_c().await?;
     Ok(())
 }

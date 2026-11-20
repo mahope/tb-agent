@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use rmcp::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
-    ToolAnnotations,
+    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
+    Tool, ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -64,6 +64,7 @@ fn text_result(value: &Value, is_error: bool) -> CallToolResult {
 impl ServerHandler for TbServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("tb-agent", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
     }
 
@@ -82,7 +83,10 @@ impl ServerHandler for TbServer {
     ) -> Result<CallToolResponse, ErrorData> {
         let name = request.name.to_string();
         if tb_protocol::find_op(&name).is_none() {
-            return Err(ErrorData::invalid_params(format!("unknown tool `{name}`"), None));
+            return Err(ErrorData::invalid_params(
+                format!("unknown tool `{name}`"),
+                None,
+            ));
         }
         let params = request.arguments.map_or(Value::Null, Value::Object);
         let result = match self.daemon.request(&name, params, None).await {
@@ -113,7 +117,11 @@ pub async fn serve_stdio(daemon: Daemon) -> Result<()> {
 /// Build the HTTP router: streamable HTTP MCP at `/mcp`. Only loopback `Host` headers are
 /// accepted unless `allow_hosts` adds more, which protects against DNS rebinding.
 pub fn http_router(daemon: Arc<Daemon>, allow_hosts: Vec<String>) -> axum::Router {
-    let mut hosts = vec!["localhost".to_owned(), "127.0.0.1".to_owned(), "::1".to_owned()];
+    let mut hosts = vec![
+        "localhost".to_owned(),
+        "127.0.0.1".to_owned(),
+        "::1".to_owned(),
+    ];
     hosts.extend(allow_hosts);
     let config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(hosts)
@@ -135,7 +143,9 @@ pub async fn serve_http(daemon: Daemon, addr: SocketAddr, allow_hosts: Vec<Strin
     let local = listener.local_addr()?;
     eprintln!("tb mcp: streamable HTTP on http://{local}/mcp");
     if !local.ip().is_loopback() {
-        eprintln!("tb mcp: warning: {local} is not a loopback address; the endpoint has no authentication");
+        eprintln!(
+            "tb mcp: warning: {local} is not a loopback address; the endpoint has no authentication"
+        );
     }
     let app = http_router(Arc::new(daemon), allow_hosts);
     axum::serve(listener, app)

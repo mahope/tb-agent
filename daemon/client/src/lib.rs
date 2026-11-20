@@ -13,9 +13,9 @@ use tb_protocol::{
     ConnectionInfo, ErrorBody, Frame, Hello, MAX_STREAM_BYTES, PROTOCOL_VERSION, Role, Welcome,
 };
 use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -168,7 +168,14 @@ impl Client {
     ) -> Result<Value, ClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (tx, rx) = oneshot::channel();
-        lock(&self.slots).insert(id.clone(), Slot { tx, buf: String::new(), next_seq: 0 });
+        lock(&self.slots).insert(
+            id.clone(),
+            Slot {
+                tx,
+                buf: String::new(),
+                next_seq: 0,
+            },
+        );
         let frame = Frame::Request {
             id: id.clone(),
             op: op.to_owned(),
@@ -194,21 +201,27 @@ fn dispatch(slots: &Slots, frame: Frame) {
             let Some(slot) = map.get_mut(&id) else { return };
             if seq != slot.next_seq || slot.buf.len() + data.len() > MAX_STREAM_BYTES {
                 if let Some(slot) = map.remove(&id) {
-                    let _ = slot
-                        .tx
-                        .send(Err(ClientError::Protocol("out-of-order or oversized chunk".into())));
+                    let _ = slot.tx.send(Err(ClientError::Protocol(
+                        "out-of-order or oversized chunk".into(),
+                    )));
                 }
                 return;
             }
             slot.next_seq += 1;
             slot.buf.push_str(&data);
         }
-        Frame::Response { id, ok, result, error, streamed } => {
+        Frame::Response {
+            id,
+            ok,
+            result,
+            error,
+            streamed,
+        } => {
             let Some(slot) = map.remove(&id) else { return };
             let outcome = if !ok {
-                Err(ClientError::Remote(
-                    error.unwrap_or_else(|| ErrorBody::new("unknown", "request failed")),
-                ))
+                Err(ClientError::Remote(error.unwrap_or_else(|| {
+                    ErrorBody::new("unknown", "request failed")
+                })))
             } else if streamed {
                 serde_json::from_str(&slot.buf)
                     .map_err(|e| ClientError::Protocol(format!("streamed result is not JSON: {e}")))

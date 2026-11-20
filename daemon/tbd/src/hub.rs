@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tb_protocol::{Capabilities, Frame, MAX_STREAM_BYTES, PROTOCOL_VERSION, code, find_op, validate_params};
+use tb_protocol::{
+    Capabilities, Frame, MAX_STREAM_BYTES, PROTOCOL_VERSION, code, find_op, validate_params,
+};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::AbortHandle;
 
@@ -76,7 +78,9 @@ impl Hub {
         let mut state = self.lock();
         let old = state.ext.replace(ExtConn { conn_id, tx, caps });
         if let Some(old) = old {
-            let _ = old.tx.send(Out::Close(1012, "replaced by a newer extension connection"));
+            let _ = old
+                .tx
+                .send(Out::Close(1012, "replaced by a newer extension connection"));
             fail_pending(&mut state, old.conn_id, code::EXTENSION_DISCONNECTED);
         }
     }
@@ -117,7 +121,11 @@ impl Hub {
             let _ = client_tx.send(Out::Frame(frame));
         };
         let Some(spec) = find_op(op) else {
-            return reply(Frame::err(id, code::UNKNOWN_OP, format!("unknown operation `{op}`")));
+            return reply(Frame::err(
+                id,
+                code::UNKNOWN_OP,
+                format!("unknown operation `{op}`"),
+            ));
         };
         if let Err(message) = validate_params(spec, &params) {
             return reply(Frame::err(id, code::BAD_REQUEST, message));
@@ -157,7 +165,11 @@ impl Hub {
         };
         if ext.tx.send(Out::Frame(forward)).is_err() {
             drop(state);
-            return reply(Frame::err(id, code::EXTENSION_DISCONNECTED, "extension connection is closing"));
+            return reply(Frame::err(
+                id,
+                code::EXTENSION_DISCONNECTED,
+                "extension connection is closing",
+            ));
         }
 
         let hub = std::sync::Arc::clone(self);
@@ -217,8 +229,16 @@ impl Hub {
     pub fn extension_frame(&self, conn_id: u64, frame: Frame) {
         let mut state = self.lock();
         match frame {
-            Frame::Response { id, ok, result, error, streamed } => {
-                let Some(p) = state.pending.get(&id) else { return };
+            Frame::Response {
+                id,
+                ok,
+                result,
+                error,
+                streamed,
+            } => {
+                let Some(p) = state.pending.get(&id) else {
+                    return;
+                };
                 if p.ext_conn != conn_id {
                     return;
                 }
@@ -232,7 +252,9 @@ impl Hub {
                 drop_pending(&mut state, &id, false);
             }
             Frame::Chunk { id, seq, data } => {
-                let Some(p) = state.pending.get_mut(&id) else { return };
+                let Some(p) = state.pending.get_mut(&id) else {
+                    return;
+                };
                 if p.ext_conn != conn_id {
                     return;
                 }
@@ -272,10 +294,11 @@ impl Hub {
 fn drop_pending(state: &mut State, daemon_id: &str, tell_extension: bool) {
     if let Some(p) = state.pending.remove(daemon_id) {
         p.timer.abort();
-        if tell_extension
-            && let Some(ext) = state.ext.as_ref().filter(|e| e.conn_id == p.ext_conn)
+        if tell_extension && let Some(ext) = state.ext.as_ref().filter(|e| e.conn_id == p.ext_conn)
         {
-            let _ = ext.tx.send(Out::Frame(Frame::Cancel { id: daemon_id.to_owned() }));
+            let _ = ext.tx.send(Out::Frame(Frame::Cancel {
+                id: daemon_id.to_owned(),
+            }));
         }
     }
 }

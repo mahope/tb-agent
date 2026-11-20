@@ -1,0 +1,22 @@
+---
+source: tb/tests/cli.rs
+expression: out.json()
+---
+{
+  "attachments": [],
+  "author": "Alice <alice@example.com>",
+  "body": "Hello, this is the body of \"Quarterly report\".",
+  "bodyFormat": "markdown",
+  "ccList": [],
+  "date": "2026-11-18T09:00:00.000Z",
+  "flagged": false,
+  "folderPath": "imap://work@mail.example.com/INBOX",
+  "id": "m1@example.com",
+  "read": false,
+  "recipients": [
+    "mads@example.com"
+  ],
+  "subject": "Quarterly report",
+  "tags": [],
+  "threadId": "m1@example.com"
+}

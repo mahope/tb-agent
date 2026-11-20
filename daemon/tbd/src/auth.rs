@@ -85,7 +85,10 @@ mod tests {
         let token = new_token();
         let mut h = HeaderMap::new();
         assert!(!check(&h, &token).valid);
-        h.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        h.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
         assert!(check(&h, &token).valid);
         h.insert(header::AUTHORIZATION, "Bearer nope".parse().unwrap());
         assert!(!check(&h, &token).valid);

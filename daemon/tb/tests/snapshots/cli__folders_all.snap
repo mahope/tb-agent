@@ -1,0 +1,34 @@
+---
+source: tb/tests/cli.rs
+expression: "env.tb(&[\"folders\"]).await.json()"
+---
+[
+  {
+    "accountId": "account1",
+    "name": "Inbox",
+    "path": "imap://work@mail.example.com/INBOX",
+    "totalMessages": 3,
+    "unreadMessages": 1
+  },
+  {
+    "accountId": "account1",
+    "name": "Drafts",
+    "path": "imap://work@mail.example.com/Drafts",
+    "totalMessages": 0,
+    "unreadMessages": 0
+  },
+  {
+    "accountId": "account1",
+    "name": "Trash",
+    "path": "imap://work@mail.example.com/Trash",
+    "totalMessages": 0,
+    "unreadMessages": 0
+  },
+  {
+    "accountId": "account2",
+    "name": "Inbox",
+    "path": "imap://me@home.example.net/INBOX",
+    "totalMessages": 1,
+    "unreadMessages": 1
+  }
+]

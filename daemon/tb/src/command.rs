@@ -454,7 +454,9 @@ impl Params {
 fn read_text(source: &str) -> Result<String> {
     if source == "-" {
         let mut text = String::new();
-        std::io::stdin().read_to_string(&mut text).context("cannot read stdin")?;
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .context("cannot read stdin")?;
         Ok(text)
     } else {
         std::fs::read_to_string(source).with_context(|| format!("cannot read {source}"))
@@ -521,10 +523,13 @@ impl Command {
                     .opt("endDate", a.until.clone())
                     .opt("maxResults", a.limit)
                     .opt("offset", a.offset)
-                    .opt("sortOrder", a.sort.map(|s| match s {
-                        Sort::Asc => "asc",
-                        Sort::Desc => "desc",
-                    }))
+                    .opt(
+                        "sortOrder",
+                        a.sort.map(|s| match s {
+                            Sort::Asc => "asc",
+                            Sort::Desc => "desc",
+                        }),
+                    )
                     .flag("unreadOnly", a.unread)
                     .flag("flaggedOnly", a.flagged)
                     .opt("tag", a.tag.clone())
@@ -637,7 +642,8 @@ impl Command {
                 "updateMessage"
             }
             Command::Delete(a) => {
-                p.set("messageIds", a.ids.clone()).set("folderPath", a.folder.clone());
+                p.set("messageIds", a.ids.clone())
+                    .set("folderPath", a.folder.clone());
                 "deleteMessages"
             }
             Command::Draft(a) => {
@@ -654,7 +660,9 @@ impl Command {
                 "saveDraft"
             }
             Command::Send(a) => {
-                p.set("to", a.to.clone()).set("subject", a.subject.clone()).flag("skipReview", a.yes);
+                p.set("to", a.to.clone())
+                    .set("subject", a.subject.clone())
+                    .flag("skipReview", a.yes);
                 compose(&mut p, &a.common)?;
                 if !p.0.contains_key("body") {
                     bail!("give --body or --body-file");
@@ -686,7 +694,8 @@ impl Command {
                 "forwardMessage"
             }
             Command::Refresh(a) => {
-                p.set("folderPath", a.folder.clone()).opt("timeoutMs", a.timeout_ms);
+                p.set("folderPath", a.folder.clone())
+                    .opt("timeoutMs", a.timeout_ms);
                 "refreshFolder"
             }
             Command::Call(a) => {
@@ -695,7 +704,8 @@ impl Command {
                     (None, Some(f)) => read_text(f)?,
                     (None, None) => "{}".to_owned(),
                 };
-                let params: Value = serde_json::from_str(&text).context("params are not valid JSON")?;
+                let params: Value =
+                    serde_json::from_str(&text).context("params are not valid JSON")?;
                 return Ok(Some((a.op.clone(), params)));
             }
         };
@@ -718,14 +728,29 @@ mod tests {
             &["status"],
             &["accounts"],
             &["folders", "--account", "a1", "--table"],
-            &["search", "report", "--limit", "5", "--unread", "--no-subfolders"],
+            &[
+                "search",
+                "report",
+                "--limit",
+                "5",
+                "--unread",
+                "--no-subfolders",
+            ],
             &["recent", "--days", "3"],
             &["get", "m1", "--folder", "f", "--format", "text"],
             &["get-many", "m1", "m2", "--folder", "f"],
             &["headers", "m1", "--folder", "f"],
             &["headers", "m1", "m2", "--folder", "f"],
             &["attachments", "--name", "invoice"],
-            &["update", "m1", "--folder", "f", "--read", "--add-tag", "$label1"],
+            &[
+                "update",
+                "m1",
+                "--folder",
+                "f",
+                "--read",
+                "--add-tag",
+                "$label1",
+            ],
             &["mark", "m1", "m2", "--folder", "f", "--unflag"],
             &["tag", "m1", "--folder", "f", "--add", "x"],
             &["move", "m1", "--folder", "f", "--to", "g"],
@@ -739,7 +764,8 @@ mod tests {
         ];
         for args in cases {
             let (op, params) = request(args);
-            let spec = tb_protocol::find_op(&op).unwrap_or_else(|| panic!("{args:?}: unknown op {op}"));
+            let spec =
+                tb_protocol::find_op(&op).unwrap_or_else(|| panic!("{args:?}: unknown op {op}"));
             tb_protocol::validate_params(spec, &params)
                 .unwrap_or_else(|e| panic!("{args:?}: {e} in {params}"));
         }

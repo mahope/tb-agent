@@ -1,0 +1,17 @@
+---
+source: tb/tests/cli.rs
+expression: status
+---
+{
+  "daemonVersion": null,
+  "extension": {
+    "extensionVersion": "0.0.0-fake",
+    "modules": [
+      "core"
+    ],
+    "thunderbird": "154.0"
+  },
+  "extensionConnected": true,
+  "pendingRequests": 0,
+  "protocol": 1
+}

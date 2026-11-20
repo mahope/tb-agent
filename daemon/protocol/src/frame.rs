@@ -127,9 +127,15 @@ pub enum Frame {
     },
     /// A slice of the JSON text of a streamed result. Concatenating the `data` of all chunks
     /// of one id in `seq` order (starting at 0) yields the result document.
-    Chunk { id: String, seq: u64, data: String },
+    Chunk {
+        id: String,
+        seq: u64,
+        data: String,
+    },
     /// Abandon a request.
-    Cancel { id: String },
+    Cancel {
+        id: String,
+    },
     Ping,
     Pong,
 }
@@ -187,7 +193,10 @@ mod tests {
     #[test]
     fn response_omits_empty_fields() {
         let text = Frame::ok("7", json!({"a": 1})).to_text();
-        assert_eq!(text, r#"{"type":"response","id":"7","ok":true,"result":{"a":1}}"#);
+        assert_eq!(
+            text,
+            r#"{"type":"response","id":"7","ok":true,"result":{"a":1}}"#
+        );
     }
 
     #[test]

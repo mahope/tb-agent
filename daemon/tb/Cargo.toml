@@ -24,7 +24,7 @@ tokio.workspace = true
 [dev-dependencies]
 tb-testkit.workspace = true
 tbd.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 insta = { version = "1.49", features = ["json"] }
 
 [lints]

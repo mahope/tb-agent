@@ -1,6 +1,12 @@
 //! A fake Thunderbird extension. It speaks the extension side of the protocol and answers the
 //! core operations from a small fixed mailbox, so contract tests need no Thunderbird.
 
+mod daemon;
+#[cfg(test)]
+mod streaming_tests;
+
+pub use daemon::TestDaemon;
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
@@ -19,6 +25,8 @@ pub const PERSONAL_INBOX: &str = "imap://me@home.example.net/INBOX";
 
 /// Id of the message whose body is large enough to be streamed in chunks.
 pub const BIG_MESSAGE: &str = "big@example.com";
+/// Requests naming this message ID are never answered.
+pub const HANG_MESSAGE: &str = "hang@example.com";
 /// Body size of [`BIG_MESSAGE`] in bytes.
 pub const BIG_BODY_BYTES: usize = 200_000;
 
@@ -88,11 +96,16 @@ impl FakeExtension {
         let task = tokio::spawn(async move {
             let mailbox = Mailbox::new();
             while let Some(Ok(message)) = stream.next().await {
-                let Message::Text(text) = message else { continue };
+                let Message::Text(text) = message else {
+                    continue;
+                };
                 let Ok(Frame::Request { id, op, params, .. }) = Frame::parse(text.as_str()) else {
                     continue;
                 };
                 seen.lock().unwrap().push((op.clone(), params.clone()));
+                if params.get("messageId").and_then(Value::as_str) == Some(HANG_MESSAGE) {
+                    continue; // never answers, to test timeouts, cancels and disconnects
+                }
                 let frames = match mailbox.handle(&op, &params) {
                     Ok(result) => result_frames(&id, &result, &config),
                     Err((code, message)) => vec![Frame::err(&id, &code, message)],
@@ -131,7 +144,11 @@ fn result_frames(id: &str, result: &Value, config: &FakeConfig) -> Vec<Frame> {
             cut -= 1;
         }
         let (head, tail) = rest.split_at(cut);
-        frames.push(Frame::Chunk { id: id.to_owned(), seq, data: head.to_owned() });
+        frames.push(Frame::Chunk {
+            id: id.to_owned(),
+            seq,
+            data: head.to_owned(),
+        });
         rest = tail;
         seq += 1;
     }
@@ -157,27 +174,56 @@ fn not_found(what: &str) -> Failure {
 
 impl Mailbox {
     fn new() -> Self {
-        let header = |id: &str, folder: &str, subject: &str, author: &str, date: &str, read: bool| {
-            json!({
-                "id": id,
-                "threadId": id,
-                "subject": subject,
-                "author": author,
-                "recipients": ["mads@example.com"],
-                "ccList": [],
-                "date": date,
-                "read": read,
-                "flagged": false,
-                "tags": [],
-                "folderPath": folder,
-            })
-        };
+        let header =
+            |id: &str, folder: &str, subject: &str, author: &str, date: &str, read: bool| {
+                json!({
+                    "id": id,
+                    "threadId": id,
+                    "subject": subject,
+                    "author": author,
+                    "recipients": ["mads@example.com"],
+                    "ccList": [],
+                    "date": date,
+                    "read": read,
+                    "flagged": false,
+                    "tags": [],
+                    "folderPath": folder,
+                })
+            };
         Self {
             messages: vec![
-                header("m1@example.com", INBOX, "Quarterly report", "Alice <alice@example.com>", "2026-11-18T09:00:00.000Z", false),
-                header("m2@example.com", INBOX, "Lunch on Friday?", "Bob <bob@example.com>", "2026-11-17T12:30:00.000Z", true),
-                header("m3@example.com", PERSONAL_INBOX, "Invoice 2026-11", "Billing <billing@example.org>", "2026-11-16T08:15:00.000Z", false),
-                header(BIG_MESSAGE, INBOX, "Large newsletter", "News <news@example.com>", "2026-11-15T07:00:00.000Z", true),
+                header(
+                    "m1@example.com",
+                    INBOX,
+                    "Quarterly report",
+                    "Alice <alice@example.com>",
+                    "2026-11-18T09:00:00.000Z",
+                    false,
+                ),
+                header(
+                    "m2@example.com",
+                    INBOX,
+                    "Lunch on Friday?",
+                    "Bob <bob@example.com>",
+                    "2026-11-17T12:30:00.000Z",
+                    true,
+                ),
+                header(
+                    "m3@example.com",
+                    PERSONAL_INBOX,
+                    "Invoice 2026-11",
+                    "Billing <billing@example.org>",
+                    "2026-11-16T08:15:00.000Z",
+                    false,
+                ),
+                header(
+                    BIG_MESSAGE,
+                    INBOX,
+                    "Large newsletter",
+                    "News <news@example.com>",
+                    "2026-11-15T07:00:00.000Z",
+                    true,
+                ),
             ],
         }
     }
@@ -217,9 +263,16 @@ impl Mailbox {
                 Ok(Value::Array(folders))
             }
             "searchMessages" | "getRecentMessages" => {
-                let query = params.get("query").and_then(Value::as_str).unwrap_or("").to_lowercase();
+                let query = params
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_lowercase();
                 let folder = params.get("folderPath").and_then(Value::as_str);
-                let unread_only = params.get("unreadOnly").and_then(Value::as_bool).unwrap_or(false);
+                let unread_only = params
+                    .get("unreadOnly")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let hits: Vec<Value> = self
                     .messages
                     .iter()
@@ -227,16 +280,31 @@ impl Mailbox {
                     .filter(|m| !unread_only || m["read"] == false)
                     .filter(|m| {
                         query.split_whitespace().all(|t| {
-                            m["subject"].as_str().unwrap_or("").to_lowercase().contains(t)
-                                || m["author"].as_str().unwrap_or("").to_lowercase().contains(t)
+                            m["subject"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(t)
+                                || m["author"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_lowercase()
+                                    .contains(t)
                         })
                     })
                     .cloned()
                     .collect();
                 if let Some(offset) = params.get("offset").and_then(Value::as_u64) {
-                    let limit = params.get("maxResults").and_then(Value::as_u64).unwrap_or(50);
+                    let limit = params
+                        .get("maxResults")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(50);
                     let total = hits.len();
-                    let page: Vec<Value> = hits.into_iter().skip(offset as usize).take(limit as usize).collect();
+                    let page: Vec<Value> = hits
+                        .into_iter()
+                        .skip(offset as usize)
+                        .take(limit as usize)
+                        .collect();
                     let has_more = (offset + limit) < total as u64;
                     return Ok(json!({"messages": page, "totalMatches": total,
                                      "offset": offset, "limit": limit, "hasMore": has_more}));
@@ -250,15 +318,23 @@ impl Mailbox {
                 let m = self.find(params).ok_or_else(|| not_found("message"))?;
                 let mut out = m.clone();
                 if params.get("rawSource").and_then(Value::as_bool) == Some(true) {
-                    return Ok(json!({"id": m["id"], "rawSource": format!("Subject: {}\r\n\r\nbody\r\n", m["subject"].as_str().unwrap_or(""))}));
+                    return Ok(
+                        json!({"id": m["id"], "rawSource": format!("Subject: {}\r\n\r\nbody\r\n", m["subject"].as_str().unwrap_or(""))}),
+                    );
                 }
                 let body = if m["id"] == BIG_MESSAGE {
                     "x".repeat(BIG_BODY_BYTES)
                 } else {
-                    format!("Hello, this is the body of \"{}\".", m["subject"].as_str().unwrap_or(""))
+                    format!(
+                        "Hello, this is the body of \"{}\".",
+                        m["subject"].as_str().unwrap_or("")
+                    )
                 };
                 out["body"] = Value::String(body);
-                out["bodyFormat"] = params.get("bodyFormat").cloned().unwrap_or_else(|| json!("markdown"));
+                out["bodyFormat"] = params
+                    .get("bodyFormat")
+                    .cloned()
+                    .unwrap_or_else(|| json!("markdown"));
                 out["attachments"] = json!([]);
                 Ok(out)
             }
@@ -268,12 +344,17 @@ impl Mailbox {
                 for item in &items {
                     out.push(match self.handle("getMessage", item) {
                         Ok(v) => v,
-                        Err((code, message)) => json!({"error": {"code": code, "message": message}}),
+                        Err((code, message)) => {
+                            json!({"error": {"code": code, "message": message}})
+                        }
                     });
                 }
                 Ok(Value::Array(out))
             }
-            "getMessageHeaders" => self.find(params).cloned().ok_or_else(|| not_found("message")),
+            "getMessageHeaders" => self
+                .find(params)
+                .cloned()
+                .ok_or_else(|| not_found("message")),
             "batchGetMessageHeaders" => {
                 let folder = params["folderPath"].as_str().unwrap_or_default();
                 let ids: Vec<&str> = params["messageIds"]
@@ -283,7 +364,10 @@ impl Mailbox {
                 Ok(Value::Array(
                     self.messages
                         .iter()
-                        .filter(|m| m["folderPath"] == folder && ids.contains(&m["id"].as_str().unwrap_or("")))
+                        .filter(|m| {
+                            m["folderPath"] == folder
+                                && ids.contains(&m["id"].as_str().unwrap_or(""))
+                        })
                         .cloned()
                         .collect(),
                 ))
@@ -299,12 +383,17 @@ impl Mailbox {
                 let count = params["messageIds"].as_array().map_or(0, Vec::len);
                 Ok(json!({"success": true, "deleted": count}))
             }
-            "saveDraft" => Ok(json!({"success": true, "folderPath": DRAFTS, "messageId": "draft-1@example.com"})),
+            "saveDraft" => Ok(
+                json!({"success": true, "folderPath": DRAFTS, "messageId": "draft-1@example.com"}),
+            ),
             "sendMail" | "replyToMessage" | "forwardMessage" => {
                 let direct = params.get("skipReview").and_then(Value::as_bool) == Some(true);
                 Ok(json!({"success": true, "mode": if direct { "sent" } else { "review" }}))
             }
-            other => Err(("unsupported_op".into(), format!("fake extension does not implement {other}"))),
+            other => Err((
+                "unsupported_op".into(),
+                format!("fake extension does not implement {other}"),
+            )),
         }
     }
 }

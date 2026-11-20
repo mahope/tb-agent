@@ -1,0 +1,21 @@
+---
+source: tb/tests/cli.rs
+expression: "env.tb(&[\"search\", \"report\"]).await.json()"
+---
+[
+  {
+    "author": "Alice <alice@example.com>",
+    "ccList": [],
+    "date": "2026-11-18T09:00:00.000Z",
+    "flagged": false,
+    "folderPath": "imap://work@mail.example.com/INBOX",
+    "id": "m1@example.com",
+    "read": false,
+    "recipients": [
+      "mads@example.com"
+    ],
+    "subject": "Quarterly report",
+    "tags": [],
+    "threadId": "m1@example.com"
+  }
+]

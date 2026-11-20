@@ -1,0 +1,13 @@
+---
+source: tb/tests/cli.rs
+expression: "env.tb(&[\"folders\", \"--account\", \"account2\"]).await.json()"
+---
+[
+  {
+    "accountId": "account2",
+    "name": "Inbox",
+    "path": "imap://me@home.example.net/INBOX",
+    "totalMessages": 1,
+    "unreadMessages": 1
+  }
+]

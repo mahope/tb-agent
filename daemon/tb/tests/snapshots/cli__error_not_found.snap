@@ -1,0 +1,10 @@
+---
+source: tb/tests/cli.rs
+expression: out.error_json()
+---
+{
+  "error": {
+    "code": "not_found",
+    "message": "message not found"
+  }
+}

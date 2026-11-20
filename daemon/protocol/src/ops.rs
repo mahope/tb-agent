@@ -83,7 +83,11 @@ pub fn validate_params(spec: &OpSpec, params: &Value) -> Result<(), String> {
             return Err(format!("missing required parameter `{key}`"));
         }
     }
-    if let Some(props) = spec.input_schema.get("properties").and_then(Value::as_object) {
+    if let Some(props) = spec
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+    {
         for (key, value) in map {
             let expected = props
                 .get(key)

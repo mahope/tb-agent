@@ -1,0 +1,8 @@
+---
+source: tb/tests/cli.rs
+expression: "env.tb(&[\"trash\", \"m1@example.com\", \"m2@example.com\", \"--folder\",\nINBOX]).await.json()"
+---
+{
+  "success": true,
+  "updated": 2
+}

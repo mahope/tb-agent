@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -72,7 +72,10 @@ impl RunningServer {
 
 pub async fn start(config: Config) -> Result<RunningServer> {
     if !config.bind.ip().is_loopback() {
-        bail!("refusing to listen on {}: the daemon only accepts loopback addresses", config.bind);
+        bail!(
+            "refusing to listen on {}: the daemon only accepts loopback addresses",
+            config.bind
+        );
     }
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
@@ -145,7 +148,9 @@ async fn read_frame(
     loop {
         match stream.next().await? {
             Ok(Message::Text(text)) => {
-                return Some(Frame::parse(text.as_str()).map_err(|e| format!("invalid frame: {e}")));
+                return Some(
+                    Frame::parse(text.as_str()).map_err(|e| format!("invalid frame: {e}")),
+                );
             }
             Ok(Message::Binary(_)) => return Some(Err("binary frames are not allowed".into())),
             Ok(Message::Close(_)) | Err(_) => return None,
@@ -162,13 +167,20 @@ async fn handle_socket(hub: Arc<Hub>, socket: WebSocket) {
         while let Some(out) = rx.recv().await {
             match out {
                 Out::Frame(frame) => {
-                    if sink.send(Message::Text(frame.to_text().into())).await.is_err() {
+                    if sink
+                        .send(Message::Text(frame.to_text().into()))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
                 Out::Close(code, reason) => {
                     let _ = sink
-                        .send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
+                        .send(Message::Close(Some(CloseFrame {
+                            code,
+                            reason: reason.into(),
+                        })))
                         .await;
                     break;
                 }
@@ -216,7 +228,12 @@ async fn handle_socket(hub: Arc<Hub>, socket: WebSocket) {
             let _ = tx.send(Out::Frame(Frame::Welcome(welcome(&hub))));
             while let Some(frame) = read_frame(&mut stream).await {
                 match frame {
-                    Ok(Frame::Request { id, op, params, timeout_ms }) => {
+                    Ok(Frame::Request {
+                        id,
+                        op,
+                        params,
+                        timeout_ms,
+                    }) => {
                         hub.client_request(conn_id, &tx, id, &op, params, timeout_ms);
                     }
                     Ok(Frame::Cancel { id }) => hub.client_cancel(conn_id, &id),

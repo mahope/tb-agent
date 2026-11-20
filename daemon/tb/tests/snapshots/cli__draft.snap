@@ -1,0 +1,9 @@
+---
+source: tb/tests/cli.rs
+expression: "env.tb(&[\"draft\", \"--to\", \"a@example.com\", \"--subject\", \"Hi\", \"--body\",\n\"Text\", \"--attach\", \"/tmp/a.pdf\"]).await.json()"
+---
+{
+  "folderPath": "imap://work@mail.example.com/Drafts",
+  "messageId": "draft-1@example.com",
+  "success": true
+}

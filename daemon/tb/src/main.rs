@@ -71,7 +71,10 @@ async fn main() -> ExitCode {
         Err(err) => return fail("bad_request", &format!("{err:#}"), 2),
     };
 
-    let path = cli.connection_file.clone().unwrap_or_else(tb_protocol::connection::default_path);
+    let path = cli
+        .connection_file
+        .clone()
+        .unwrap_or_else(tb_protocol::connection::default_path);
     let client = match Client::connect_file(&path, "tb").await {
         Ok(client) => client,
         Err(err) => return fail("daemon_unavailable", &err.to_string(), EXIT_UNREACHABLE),
@@ -84,7 +87,11 @@ async fn main() -> ExitCode {
         }
         Err(err) => {
             let body = err.to_body();
-            let exit = if matches!(err, ClientError::Connect(_)) { EXIT_UNREACHABLE } else { EXIT_FAILED };
+            let exit = if matches!(err, ClientError::Connect(_)) {
+                EXIT_UNREACHABLE
+            } else {
+                EXIT_FAILED
+            };
             fail(&body.code, &body.message, exit)
         }
     }
