@@ -16,6 +16,8 @@ use crate::policy::Permission;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MessageState {
     pub message_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance_id: String,
     pub folder_path: String,
     pub read: bool,
     pub flagged: bool,
@@ -51,6 +53,8 @@ enum Event {
         audit_id: String,
         time_ms: u64,
         success: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        conflict: bool,
         after: Vec<MessageState>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_message_id: Option<String>,
@@ -68,6 +72,7 @@ pub struct Audit {
     _lock: File,
     intents: HashMap<String, WriteIntent>,
     completed: HashMap<String, Undo>,
+    claimed: HashMap<String, Undo>,
     failed: bool,
 }
 
@@ -96,6 +101,7 @@ impl Audit {
             _lock: lock,
             intents: HashMap::new(),
             completed: HashMap::new(),
+            claimed: HashMap::new(),
             failed: false,
         };
         let mut reader = BufReader::new(audit.file.try_clone()?);
@@ -121,10 +127,11 @@ impl Audit {
                 audit_id, write, ..
             } => {
                 if let Some(original) = &write.undo_of {
-                    ensure!(
-                        self.completed.remove(original).is_some(),
-                        "invalid undo reference in audit log"
-                    );
+                    let undo = self
+                        .completed
+                        .remove(original)
+                        .context("invalid undo reference in audit log")?;
+                    self.claimed.insert(audit_id.clone(), undo);
                 }
                 ensure!(
                     self.intents.insert(audit_id, write).is_none(),
@@ -134,6 +141,7 @@ impl Audit {
             Event::Finished {
                 audit_id,
                 success,
+                conflict,
                 after,
                 ..
             } => {
@@ -141,6 +149,15 @@ impl Audit {
                     .intents
                     .remove(&audit_id)
                     .context("audit outcome has no intent")?;
+                if let Some(original) = &write.undo_of {
+                    let undo = self
+                        .claimed
+                        .remove(&audit_id)
+                        .context("missing undo claim")?;
+                    if conflict {
+                        self.completed.insert(original.clone(), undo);
+                    }
+                }
                 if success && write.reversible && !after.is_empty() {
                     self.completed.insert(audit_id, Undo { write, after });
                 }
@@ -177,6 +194,7 @@ impl Audit {
         &mut self,
         audit_id: String,
         success: bool,
+        conflict: bool,
         after: Vec<MessageState>,
         created_message_id: Option<String>,
     ) -> Result<()> {
@@ -184,13 +202,23 @@ impl Audit {
             audit_id,
             time_ms: now(),
             success,
+            conflict,
             after,
             created_message_id,
         })
     }
 
     pub fn undo(&self, audit_id: &str) -> Option<Undo> {
-        self.completed.get(audit_id).cloned()
+        self.completed
+            .get(audit_id)
+            .filter(|undo| {
+                undo.write
+                    .previous
+                    .iter()
+                    .chain(&undo.after)
+                    .all(|state| !state.instance_id.is_empty())
+            })
+            .cloned()
     }
 }
 
@@ -230,6 +258,7 @@ mod tests {
         let path = dir.join("audit.jsonl");
         let mut previous = MessageState {
             message_id: "message@example.com".into(),
+            instance_id: "instance-1".into(),
             folder_path: "inbox".into(),
             read: false,
             flagged: false,
@@ -247,27 +276,45 @@ mod tests {
             undo_of: None,
         };
         let confirmed = audit.begin(intent.clone()).unwrap();
-        let unresolved = audit.begin(intent).unwrap();
+        let unresolved = audit.begin(intent.clone()).unwrap();
+        let mut legacy_intent = intent;
+        legacy_intent.previous[0].instance_id.clear();
+        let legacy = audit.begin(legacy_intent).unwrap();
+        let legacy_after = MessageState {
+            instance_id: String::new(),
+            read: true,
+            ..previous.clone()
+        };
+        audit
+            .finish(legacy.clone(), true, false, vec![legacy_after], None)
+            .unwrap();
         previous.read = true;
         audit
-            .finish(confirmed.clone(), true, vec![previous], None)
+            .finish(confirmed.clone(), true, false, vec![previous], None)
             .unwrap();
         drop(audit);
 
         let mut audit = Audit::open(&path).unwrap();
         assert!(audit.undo(&unresolved).is_none());
+        assert!(audit.undo(&legacy).is_none());
         let undo = audit.undo(&confirmed).unwrap();
         assert!(!undo.write.previous[0].read);
         assert!(undo.after[0].read);
-        audit
-            .begin(WriteIntent {
-                operation: "undo".into(),
-                previous: undo.after,
-                reversible: false,
-                undo_of: Some(confirmed.clone()),
-                ..undo.write
-            })
-            .unwrap();
+        let restore = WriteIntent {
+            operation: "undo".into(),
+            previous: undo.after,
+            reversible: false,
+            undo_of: Some(confirmed.clone()),
+            ..undo.write
+        };
+        let attempt = audit.begin(restore.clone()).unwrap();
+        assert!(audit.undo(&confirmed).is_none());
+        audit.finish(attempt, false, true, vec![], None).unwrap();
+        drop(audit);
+
+        let mut audit = Audit::open(&path).unwrap();
+        assert!(audit.undo(&confirmed).is_some());
+        audit.begin(restore).unwrap();
         drop(audit);
 
         let audit = Audit::open(&path).unwrap();

@@ -13,5 +13,5 @@ expression: status
   },
   "extensionConnected": true,
   "pendingRequests": 0,
-  "protocol": 1
+  "protocol": 2
 }

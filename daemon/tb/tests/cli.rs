@@ -439,18 +439,29 @@ async fn undo_restores_folders_and_flags() {
             .find(|entry| entry["auditId"] == audit_id && entry["event"] == "intent")
             .unwrap();
         assert_eq!(intent["accounts"], json!(["account1"]));
-        assert_eq!(
-            intent["previous"],
-            json!([{
-                "messageId": id, "folderPath": INBOX, "read": false, "flagged": false, "tags": []
-            }])
-        );
+        let previous = &intent["previous"][0];
+        assert_eq!(intent["previous"].as_array().unwrap().len(), 1);
+        assert_eq!(previous["messageId"], id);
+        assert!(!previous["instanceId"].as_str().unwrap().is_empty());
+        assert_eq!(previous["folderPath"], INBOX);
+        assert_eq!(previous["read"], false);
+        assert_eq!(previous["flagged"], false);
+        assert_eq!(previous["tags"], json!([]));
         assert!(intent["timeMs"].is_u64());
-        if args[0] == "move" || args[0] == "trash" {
-            assert_eq!(
-                env.tb(&["headers", id, "--folder", TRASH]).await.json()["id"],
-                id
-            );
+        let folder = if args[0] == "move" || args[0] == "trash" {
+            TRASH
+        } else {
+            INBOX
+        };
+        let changed = env.tb(&["headers", id, "--folder", folder]).await.json();
+        assert_eq!(changed["id"], id);
+        match args[0] {
+            "mark" => {
+                assert_eq!(changed["read"], true);
+                assert_eq!(changed["flagged"], true);
+            }
+            "tag" => assert_eq!(changed["tags"], json!(["$label1"])),
+            _ => {}
         }
         let undo = env.tb(&["undo", audit_id]).await;
         assert_eq!(undo.code, 0, "{}", undo.stderr);

@@ -232,6 +232,16 @@ impl Policy {
                 if let Some(target) = move_to.or(copy_to) {
                     accounts.insert(owner(inventory, target)?.to_owned());
                     permissions.insert(Move);
+                    if move_to.is_some()
+                        && inventory.trash_folders.values().any(|trash| {
+                            target == trash
+                                || target
+                                    .strip_prefix(trash)
+                                    .is_some_and(|suffix| suffix.starts_with('/'))
+                        })
+                    {
+                        permissions.insert(Trash);
+                    }
                 }
                 if trash || op == "deleteMessages" {
                     permissions.insert(Trash);
@@ -241,7 +251,11 @@ impl Policy {
                         return Err(DENIED);
                     }
                 }
-                reversible = op == "updateMessage" && copy_to.is_none();
+                reversible = if op == "deleteMessages" {
+                    inventory.trash_folders.contains_key(account)
+                } else {
+                    copy_to.is_none()
+                };
                 if permissions.is_empty() {
                     return Err(DENIED);
                 }
@@ -417,6 +431,40 @@ impl Scope {
                     .collect(),
             )
         };
+        if op == "getMessages" {
+            let project_batch = |items: Vec<Value>| {
+                Value::Array(
+                    items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            if item.get("error").is_none() {
+                                let projected = project_item(item);
+                                if !projected.is_null() {
+                                    return projected;
+                                }
+                            }
+                            json!({"index": index, "error": "message could not be read"})
+                        })
+                        .collect(),
+                )
+            };
+            return match result {
+                Value::Array(items) => project_batch(items),
+                Value::Object(mut fields) => {
+                    let Some(Value::Array(items)) = fields.remove("messages") else {
+                        return Value::Null;
+                    };
+                    fields.retain(|key, value| {
+                        matches!(key.as_str(), "requested" | "succeeded" | "failed" | "max")
+                            && value.is_u64()
+                    });
+                    fields.insert("messages".into(), project_batch(items));
+                    Value::Object(fields)
+                }
+                _ => Value::Null,
+            };
+        }
         match result {
             Value::Object(fields) if op == "listFolders" => {
                 let Some(columns) = fields.get("columns").and_then(Value::as_array) else {
@@ -440,21 +488,11 @@ impl Scope {
             }
             Value::Array(items) => project_list(items),
             Value::Object(mut fields) if matches!(op, "searchMessages" | "getRecentMessages") => {
-                fields.retain(|key, _| {
-                    [
-                        "messages",
-                        "count",
-                        "totalMatches",
-                        "offset",
-                        "limit",
-                        "hasMore",
-                    ]
-                    .contains(&key.as_str())
-                });
                 fields.retain(|key, value| match key.as_str() {
                     "messages" => value.is_array(),
                     "hasMore" => value.is_boolean(),
-                    _ => value.is_number(),
+                    "count" | "totalMatches" | "offset" | "limit" => value.is_number(),
+                    _ => false,
                 });
                 if let Some(Value::Array(items)) = fields.remove("messages") {
                     fields.insert("messages".into(), project_list(items));

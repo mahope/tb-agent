@@ -130,14 +130,16 @@ sender, subject, date, folder, read and flagged status, and tags. `headers` gran
 read access. `off` disables access. `full` enables the explicitly listed permissions.
 `move` covers move and copy, `tag` covers tags and read/flagged changes, `trash`
 covers trash and deletion, and `send` covers compose, send, draft, reply and forward.
+An explicit move into Trash also requires `trash`.
 `filters`, `rules` and `accounts` are accepted for future operations.
 
 Writes go to the local JSONL audit log under the platform local data directory
 (`~/.local/share/tb-agent/audit.jsonl` by default on Linux). Override it with
 `--audit-file` or `TB_AUDIT_FILE`. A successful write returns an `auditId`.
 Use `tb undo <audit-id>` to restore the previous folder and flags after a move,
-tag, mark or trash operation. Undo checks the current policy and restores only
-messages that still match the state recorded after the write. Keep the audit log
+tag, mark or trash operation, including deletions that move messages to Trash.
+Undo checks the current policy and restores only the specific message instances
+that still match the state recorded after the write. Keep the audit log
 and its lock file private. See the protocol for timeout and undo behavior.
 [Daemon protocol](docs/protocol.md#account-policy).
 

@@ -7,7 +7,9 @@ mod streaming_tests;
 
 pub use daemon::TestDaemon;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
@@ -40,6 +42,14 @@ pub struct FakeConfig {
     pub stream_threshold: usize,
     /// Size of each chunk.
     pub chunk_size: usize,
+    /// Return the Thunderbird batch envelope instead of a plain array.
+    pub batch_envelope: bool,
+    /// Simulate an extension returning excess fields in a restricted batch.
+    pub include_sensitive_batch_headers: bool,
+    /// Delay a mutation reply after applying the mutation.
+    pub write_reply_delay: Duration,
+    /// Reject sendMail before changing anything.
+    pub reject_send: bool,
 }
 
 impl Default for FakeConfig {
@@ -48,6 +58,10 @@ impl Default for FakeConfig {
             modules: vec!["core".into()],
             stream_threshold: 64 * 1024,
             chunk_size: 32 * 1024,
+            batch_envelope: false,
+            include_sensitive_batch_headers: false,
+            write_reply_delay: Duration::ZERO,
+            reject_send: false,
         }
     }
 }
@@ -109,7 +123,7 @@ impl FakeExtension {
                 if params.get("messageId").and_then(Value::as_str) == Some(HANG_MESSAGE) {
                     continue; // never answers, to test timeouts, cancels and disconnects
                 }
-                let frames = match mailbox.handle(&op, &params) {
+                let frames = match mailbox.handle(&op, &params, &config) {
                     Ok(result)
                         if [
                             "snapshotMessages",
@@ -123,6 +137,9 @@ impl FakeExtension {
                         ]
                         .contains(&op.as_str()) =>
                     {
+                        if op == "updateMessage" {
+                            tokio::time::sleep(config.write_reply_delay).await;
+                        }
                         vec![Frame::ok(&id, result)]
                     }
                     Ok(result) => result_frames(&id, &result, &config),
@@ -230,9 +247,10 @@ fn headers_only(params: &Value, account: &str) -> bool {
         .is_some_and(|ids| ids.iter().any(|id| id == account))
 }
 
-fn message_state(message: &Value) -> Value {
+fn message_state(message: &Value, instance: u64) -> Value {
     json!({
         "messageId": message["id"], "folderPath": message["folderPath"],
+        "instanceId": instance.to_string(),
         "read": message["read"], "flagged": message["flagged"], "tags": message["tags"],
     })
 }
@@ -241,8 +259,14 @@ fn conflict() -> Failure {
     ("conflict".into(), "mailbox state changed".into())
 }
 
+fn next_instance() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 struct Mailbox {
     messages: Vec<Value>,
+    instances: Vec<u64>,
 }
 
 type Failure = (String, String);
@@ -269,41 +293,44 @@ impl Mailbox {
                     "folderPath": folder,
                 })
             };
+        let messages = vec![
+            header(
+                "m1@example.com",
+                INBOX,
+                "Quarterly report",
+                "Alice <alice@example.com>",
+                "2026-11-18T09:00:00.000Z",
+                false,
+            ),
+            header(
+                "m2@example.com",
+                INBOX,
+                "Lunch on Friday?",
+                "Bob <bob@example.com>",
+                "2026-11-17T12:30:00.000Z",
+                true,
+            ),
+            header(
+                "m3@example.com",
+                PERSONAL_INBOX,
+                "Invoice 2026-11",
+                "Billing <billing@example.org>",
+                "2026-11-16T08:15:00.000Z",
+                false,
+            ),
+            header(
+                BIG_MESSAGE,
+                INBOX,
+                "Large newsletter",
+                "News <news@example.com>",
+                "2026-11-15T07:00:00.000Z",
+                true,
+            ),
+        ];
+        let instances = messages.iter().map(|_| next_instance()).collect();
         Self {
-            messages: vec![
-                header(
-                    "m1@example.com",
-                    INBOX,
-                    "Quarterly report",
-                    "Alice <alice@example.com>",
-                    "2026-11-18T09:00:00.000Z",
-                    false,
-                ),
-                header(
-                    "m2@example.com",
-                    INBOX,
-                    "Lunch on Friday?",
-                    "Bob <bob@example.com>",
-                    "2026-11-17T12:30:00.000Z",
-                    true,
-                ),
-                header(
-                    "m3@example.com",
-                    PERSONAL_INBOX,
-                    "Invoice 2026-11",
-                    "Billing <billing@example.org>",
-                    "2026-11-16T08:15:00.000Z",
-                    false,
-                ),
-                header(
-                    BIG_MESSAGE,
-                    INBOX,
-                    "Large newsletter",
-                    "News <news@example.com>",
-                    "2026-11-15T07:00:00.000Z",
-                    true,
-                ),
-            ],
+            messages,
+            instances,
         }
     }
 
@@ -319,8 +346,10 @@ impl Mailbox {
         expected
             .iter()
             .map(|state| {
-                let index = self.message_index(&state["messageId"], &state["folderPath"])?;
-                if message_state(&self.messages[index]) != *state {
+                let index = self
+                    .message_index(&state["messageId"], &state["folderPath"])
+                    .map_err(|_| conflict())?;
+                if message_state(&self.messages[index], self.instances[index]) != *state {
                     return Err(conflict());
                 }
                 Ok(index)
@@ -341,7 +370,7 @@ impl Mailbox {
         Ok(index)
     }
 
-    fn handle(&mut self, op: &str, params: &Value) -> Result<Value, Failure> {
+    fn handle(&mut self, op: &str, params: &Value, config: &FakeConfig) -> Result<Value, Failure> {
         let inventory = inventory();
         let folder_owner = |message: &Value| {
             message["folderPath"]
@@ -472,14 +501,31 @@ impl Mailbox {
                             item[key] = value.clone();
                         }
                     }
-                    out.push(match self.handle("getMessage", &item) {
-                        Ok(v) => v,
+                    out.push(match self.handle("getMessage", &item, config) {
+                        Ok(mut value) => {
+                            if config.include_sensitive_batch_headers
+                                && folder_owner(&item).is_some_and(|id| headers_only(params, id))
+                            {
+                                value["body"] = json!("private body");
+                                value["rawSource"] = json!("private source");
+                                value["attachments"] = json!([{"name": "private.pdf"}]);
+                            }
+                            value
+                        }
                         Err((code, message)) => {
                             json!({"error": {"code": code, "message": message}})
                         }
                     });
                 }
-                Ok(Value::Array(out))
+                if config.batch_envelope {
+                    let failed = out.iter().filter(|row| row.get("error").is_some()).count();
+                    Ok(
+                        json!({"requested": out.len(), "succeeded": out.len() - failed,
+                        "failed": failed, "max": 20, "messages": out}),
+                    )
+                } else {
+                    Ok(Value::Array(out))
+                }
             }
             "getMessageHeaders" => self
                 .find(params)
@@ -514,7 +560,7 @@ impl Mailbox {
                         if !can_access(message) {
                             return Err(conflict());
                         }
-                        Ok(message_state(message))
+                        Ok(message_state(message, self.instances[index]))
                     })
                     .collect::<Result<Vec<_>, Failure>>()?;
                 Ok(json!(states))
@@ -569,10 +615,13 @@ impl Mailbox {
                     if let Some(target) = target {
                         message["folderPath"] = json!(target);
                     }
-                    after.push(message_state(&message));
                     if params.get("copyTo").is_some() {
+                        let instance = next_instance();
+                        after.push(message_state(&message, instance));
                         self.messages.push(message);
+                        self.instances.push(instance);
                     } else {
+                        after.push(message_state(&message, self.instances[index]));
                         self.messages[index] = message;
                     }
                 }
@@ -581,11 +630,28 @@ impl Mailbox {
             "deleteMessages" => {
                 let expected = params["_expected"].as_array().ok_or_else(conflict)?;
                 let mut indexes = self.state_indexes(expected)?;
+                if params["folderPath"] == DRAFTS {
+                    if indexes.iter().any(|&index| {
+                        self.messages.iter().any(|m| {
+                            m["folderPath"] == TRASH && m["id"] == self.messages[index]["id"]
+                        })
+                    }) {
+                        return Err(conflict());
+                    }
+                    let mut after = Vec::new();
+                    for index in indexes {
+                        self.messages[index]["folderPath"] = json!(TRASH);
+                        after.push(message_state(&self.messages[index], self.instances[index]));
+                    }
+                    return Ok(json!({"success": true, "deleted": after.len(),
+                        "movedToTrash": true, "_after": after}));
+                }
                 indexes.sort_unstable_by(|a, b| b.cmp(a));
                 for &index in &indexes {
                     self.messages.remove(index);
+                    self.instances.remove(index);
                 }
-                Ok(json!({"success": true, "deleted": indexes.len()}))
+                Ok(json!({"success": true, "deleted": indexes.len(), "movedToTrash": false}))
             }
             "restoreMessages" => {
                 let expected = params["expected"].as_array().ok_or_else(conflict)?;
@@ -622,6 +688,10 @@ impl Mailbox {
             "saveDraft" => Ok(
                 json!({"success": true, "folderPath": DRAFTS, "messageId": "draft-1@example.com"}),
             ),
+            "sendMail" if config.reject_send => Err((
+                "send_rejected".into(),
+                "message rejected before sending".into(),
+            )),
             "sendMail" | "replyToMessage" | "forwardMessage" => {
                 let direct = params.get("skipReview").and_then(Value::as_bool) == Some(true);
                 Ok(json!({"success": true, "mode": if direct { "sent" } else { "review" }}))

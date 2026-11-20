@@ -12,7 +12,7 @@ pub use frame::{Capabilities, ErrorBody, Frame, Hello, Role, Welcome, code};
 pub use ops::{Access, OpSpec, find_op, ops, validate_params};
 
 /// Protocol version spoken by this build. Bumped on incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Largest single WebSocket message the daemon accepts or sends (16 MiB).
 /// Bigger results must be streamed as `chunk` frames.

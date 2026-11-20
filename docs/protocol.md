@@ -1,4 +1,4 @@
-# tb-agent protocol, version 1
+# tb-agent protocol, version 2
 
 The daemon `tbd` is a hub. Two kinds of peers connect to it over a WebSocket on localhost:
 
@@ -19,7 +19,7 @@ the WebSocket at `/ws`. At startup it generates independent client and extension
 owner-only permissions where the platform supports them. Both files have the same shape:
 
 ```json
-{ "protocol": 1, "host": "127.0.0.1", "port": 49321, "token": "9f3a...", "pid": 4711 }
+{ "protocol": 2, "host": "127.0.0.1", "port": 49321, "token": "9f3a...", "pid": 4711 }
 ```
 
 Location: `$TB_CONNECTION_FILE`, else `<runtime dir>/tb-agent/connection.json`
@@ -50,14 +50,14 @@ messages are a protocol error. A message may be at most 16 MiB; larger results a
 The first frame from every peer is `hello`. It must arrive within 5 seconds.
 
 ```json
-{ "type": "hello", "protocol": 1, "role": "client", "name": "tb 0.1.0" }
+{ "type": "hello", "protocol": 2, "role": "client", "name": "tb 0.1.0" }
 ```
 
 An extension also announces what it can do:
 
 ```json
 {
-  "type": "hello", "protocol": 1, "role": "extension", "name": "tb-agent extension 0.11.0",
+  "type": "hello", "protocol": 2, "role": "extension", "name": "tb-agent extension 0.11.0",
   "capabilities": {
     "thunderbird": "154.0",
     "extensionVersion": "0.11.0",
@@ -76,7 +76,7 @@ anything reaches the extension.
 The daemon answers with `welcome`:
 
 ```json
-{ "type": "welcome", "protocol": 1, "daemonVersion": "0.1.0",
+{ "type": "welcome", "protocol": 2, "daemonVersion": "0.1.0",
   "extensionConnected": true, "extension": { "modules": ["core"], "thunderbird": "154.0" } }
 ```
 
@@ -162,10 +162,11 @@ An extension must send either a plain `result` or a streamed one, never both.
 { "type": "cancel", "id": "7" }
 ```
 
-A client sends `cancel` to abandon a request. The daemon answers that request with a `cancelled`
-error and forwards `cancel` to the extension, which should stop the work and send nothing more
-for that id. The daemon does the same when a client disconnects or a request times out, and it
-ignores late frames for requests it no longer tracks.
+A client sends `cancel` to abandon a request. The daemon answers with a `cancelled` error.
+On cancellation, timeout or client disconnect, it sends `cancel` to the extension for reads
+and for writes still waiting for a snapshot. The extension should stop that work and send
+nothing further for the ID. The daemon keeps listening for the outcome of writes already
+dispatched, as described under [Audit and undo](#audit-and-undo).
 
 ## Keep-alive
 
@@ -178,11 +179,11 @@ daemon notices dead connections.
 `status` is answered by the daemon itself and works without an extension:
 
 ```json
-{ "daemonVersion": "0.1.0", "protocol": 1, "extensionConnected": true,
+{ "daemonVersion": "0.1.0", "protocol": 2, "extensionConnected": true,
   "extension": { "thunderbird": "154.0", "modules": ["core"] }, "pendingRequests": 0 }
 ```
 
-## Operations in version 1
+## Operations in version 2
 
 | Operation | Module | Access |
 | --- | --- | --- |
@@ -275,14 +276,21 @@ deduplication, counts and pagination to the authorized resources before executin
 operation. For header-only messages, search only sender, subject, date, folder and flags.
 For mixed batch reads, fetch only headers for entries in header-only accounts. Do not
 open their bodies, parse attachments or save them to disk. Enforce the scope on every
-resolved resource, including configured copies and destination folders.
+resolved resource, including configured copies and destination folders. A move to a
+registered Trash folder or one of its descendants requires both `move` and `trash`.
+Restricted batch reads preserve row order and keep an error row for each failed read.
+The daemon replaces per-row error details with a generic message.
 
 ### Audit and undo
 
 For writes referencing existing messages, the daemon first asks the extension for
 `snapshotMessages` with `folderPath` and `messageIds`. Its result must be an array of
-message states with `messageId`, `folderPath`, `read`, `flagged` and `tags` (a sorted
-array of unique tag keys). Each locator must resolve to exactly one message.
+message states with `messageId`, `instanceId`, `folderPath`, `read`, `flagged` and
+`tags` (a sorted array of unique tag keys). Each locator must resolve to exactly one
+message. `instanceId` is a nonempty opaque identifier for the specific mailbox
+occurrence. A copy or replacement must have a different identifier even if it has
+the same RFC Message-ID and flags. A locator whose identity cannot be established
+after a Thunderbird restart, folder rebuild or key reuse must fail the comparison.
 
 The daemon durably appends an `intent` before sending the mutation. It includes
 `auditId`, Unix epoch milliseconds (`timeMs`), `accounts`, `operation`,
@@ -290,23 +298,31 @@ The daemon durably appends an `intent` before sending the mutation. It includes
 The forwarded mutation carries those states in `_expected`. The extension must verify
 that all expected messages still match before changing any of them. On a successful
 reversible `updateMessage`, return the new states in the result's `_after` field, with
-the same message IDs and the actual folder and flags after the write. Write responses
-and snapshots are single frames.
+the same message IDs and the actual folder, instance IDs and flags after the write.
+Capture the instance resulting from the operation itself. A move may change the
+instance ID. A successful `deleteMessages` response includes `movedToTrash: false`
+for a permanent deletion, or `movedToTrash: true` with `_after` for messages moved
+to the advertised Trash folder, including deleted drafts. Write responses and
+snapshots are single frames.
 
 The daemon appends `finished` with the confirmation status and the post-write states
 needed for undo. New-message IDs are logged when the extension returns `messageId`.
 Successful client responses carry `auditId`. An intent without a confirmed outcome
-may have reached Thunderbird, including after cancellation, timeout or disconnect.
-Check the mailbox before retrying. The journal records metadata and state, and
-excludes body, recipient and attachment parameters.
+may have reached Thunderbird. After cancellation, timeout or client disconnect,
+the daemon keeps the reply path for an already dispatched write open for up to 120
+seconds while the extension stays connected. A valid late reply updates the journal.
+Check the mailbox before retrying an unconfirmed write. The journal records metadata
+and state, and excludes body, recipient and attachment parameters.
 
 `undo` accepts `{ "auditId": "..." }` and dispatches a daemon-only `restoreMessages`
 request with `expected` (post-write states) and `restore` (previous states). The daemon
 rechecks current account permissions and journals the undo before dispatch. An audit ID
-can be claimed for undo only once, including if the outcome is uncertain. The extension
-checks all expected states and destination locators before restoring. If a locator is
-ambiguous or state changed, return `conflict` without applying the restore. Copy,
-permanent deletion and compose operations have no undo.
+is reserved while an undo is in progress and consumed after success or when the
+outcome is uncertain. The extension checks all expected states, including instance
+identity, and destination locators before restoring. Use `conflict` only when no
+changes were made. A journaled undo conflict releases the reservation for retry.
+Copy, permanent deletion and compose operations have no undo. Audit entries created
+before instance IDs were introduced remain readable, with undo disabled.
 
 ## Compatibility rules
 
