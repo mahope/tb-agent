@@ -60,7 +60,7 @@ current stable Rust toolchain.
 ```bash
 cd daemon
 cargo build
-export TB_CONNECTION_FILE=/tmp/tb-demo/connection.json
+export TB_CONNECTION_FILE="$(mktemp -d)/connection.json"
 
 ./target/debug/tbd &                      # starts the daemon, writes the connection file
 sleep 1
@@ -101,8 +101,9 @@ needed in CI. CLI output is covered by snapshot tests (`insta`).
 - The daemon accepts connections on loopback only and refuses to bind anything else.
 - Every connection needs the per-session token from the connection file, which is created with
   owner-only permissions. Wrong or missing tokens get HTTP 401, and web-page origins get 403.
-- The MCP HTTP endpoint accepts only loopback `Host` headers by default. It has no
-  authentication of its own, so keep it on loopback.
+- The MCP HTTP endpoint accepts only loopback `Host` headers by default. Set `--token` (or
+  `TB_MCP_TOKEN`) to require `Authorization: Bearer <token>` on it. Without a token any local
+  process can use it, so a token is mandatory for non-loopback addresses.
 - Message content returned to agents is untrusted data. Sending still opens a compose window
   for review unless the user has allowed direct sending in the extension.
 

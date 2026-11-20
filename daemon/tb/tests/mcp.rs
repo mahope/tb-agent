@@ -287,3 +287,63 @@ async fn http_rejects_foreign_host_headers() {
     assert!(raw.starts_with("HTTP/1.1 403"), "{raw}");
     let _ = child.kill().await;
 }
+
+#[test]
+fn write_tools_are_not_marked_harmless() {
+    let tools = tb_mcp::tools();
+    let hints = |name: &str| {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        serde_json::to_value(tool.annotations.as_ref().unwrap()).unwrap()
+    };
+    for name in [
+        "sendMail",
+        "replyToMessage",
+        "forwardMessage",
+        "updateMessage",
+        "deleteMessages",
+    ] {
+        assert_eq!(hints(name)["destructiveHint"], true, "{name}");
+    }
+    assert_eq!(hints("sendMail")["openWorldHint"], true);
+    assert_eq!(hints("listAccounts")["readOnlyHint"], true);
+    assert_ne!(hints("saveDraft")["destructiveHint"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_with_token_requires_the_bearer_header() {
+    let env = Env::new().await;
+    let mut cmd = env.command();
+    let mut child = cmd
+        .args(["mcp", "--http", "127.0.0.1:0", "--token", "s3cret"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).await.unwrap();
+    let addr = line
+        .split("http://")
+        .nth(1)
+        .and_then(|s| s.split("/mcp").next())
+        .unwrap()
+        .to_owned();
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+    for (auth, expected) in [
+        ("", "HTTP/1.1 401"),
+        ("Authorization: Bearer wrong\r\n", "HTTP/1.1 401"),
+        ("Authorization: Bearer s3cret\r\n", "HTTP/1.1 200"),
+    ] {
+        let mut stream = TcpStream::connect(&addr).await.unwrap();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {addr}\r\n{auth}Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).await.unwrap();
+        assert!(raw.starts_with(expected), "{auth:?}: {raw}");
+    }
+    let _ = child.kill().await;
+}

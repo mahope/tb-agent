@@ -63,8 +63,13 @@ impl ConnectionInfo {
             source,
         };
         if let Some(dir) = path.parent() {
+            // Only a directory created here is ours to lock down; an existing one such as
+            // $HOME or /tmp must keep its permissions.
+            let created = !dir.exists();
             fs::create_dir_all(dir).map_err(fail)?;
-            restrict_dir(dir);
+            if created {
+                restrict_dir(dir);
+            }
         }
         let tmp = path.with_extension("json.tmp");
         let mut options = fs::OpenOptions::new();
@@ -127,6 +132,26 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_parent_directory_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tb-conn-perm-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let info = ConnectionInfo {
+            protocol: 1,
+            host: "127.0.0.1".into(),
+            port: 1,
+            token: "t".into(),
+            pid: 1,
+        };
+        info.write(&dir.join("connection.json")).unwrap();
+        let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
         let _ = fs::remove_dir_all(dir);
     }
 }

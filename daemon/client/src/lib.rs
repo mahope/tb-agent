@@ -17,6 +17,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     /// No connection file, or the daemon is not listening.
@@ -72,7 +74,15 @@ impl Client {
         Self::connect(&info, name).await
     }
 
+    /// Connect and complete the handshake, giving up after `CONNECT_TIMEOUT` so a stale
+    /// connection file cannot hang the caller.
     pub async fn connect(info: &ConnectionInfo, name: &str) -> Result<Self, ClientError> {
+        tokio::time::timeout(CONNECT_TIMEOUT, Self::connect_inner(info, name))
+            .await
+            .map_err(|_| ClientError::Connect("timed out waiting for the daemon".into()))?
+    }
+
+    async fn connect_inner(info: &ConnectionInfo, name: &str) -> Result<Self, ClientError> {
         let mut request = info
             .ws_url()
             .into_client_request()

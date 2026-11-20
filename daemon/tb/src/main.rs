@@ -52,7 +52,9 @@ async fn main() -> ExitCode {
     if let Command::Mcp(args) = &cli.command {
         let daemon = tb_client::Daemon::new(cli.connection_file.clone(), "tb-mcp");
         let result = match args.http {
-            Some(addr) => tb_mcp::serve_http(daemon, addr, args.allow_hosts.clone()).await,
+            Some(addr) => {
+                tb_mcp::serve_http(daemon, addr, args.allow_hosts.clone(), args.token.clone()).await
+            }
             None => tb_mcp::serve_stdio(daemon).await,
         };
         return match result {

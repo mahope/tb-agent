@@ -192,6 +192,12 @@ async fn mutations_send_the_expected_parameters() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compose_commands() {
     let env = Env::new().await;
+    // Any existing file will do; the CLI must hand the extension its absolute path.
+    let attachment = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let attachment_abs = std::fs::canonicalize(&attachment)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
 
     insta::assert_json_snapshot!(
         "draft",
@@ -204,7 +210,7 @@ async fn compose_commands() {
             "--body",
             "Text",
             "--attach",
-            "/tmp/a.pdf"
+            attachment.to_str().unwrap()
         ])
         .await
         .json()
@@ -213,7 +219,7 @@ async fn compose_commands() {
         env.last_call(),
         (
             "saveDraft".into(),
-            json!({"to": "a@example.com", "subject": "Hi", "body": "Text", "attachments": ["/tmp/a.pdf"]})
+            json!({"to": "a@example.com", "subject": "Hi", "body": "Text", "attachments": [attachment_abs]})
         )
     );
 
@@ -376,4 +382,22 @@ async fn no_extension_connected_gives_a_clear_error() {
     let out = run(command_for(&daemon.connection_file()), &["accounts"]).await;
     assert_eq!(out.code, 1);
     assert_eq!(out.error_json()["error"]["code"], "extension_unavailable");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_attachment_fails_before_sending() {
+    let env = Env::new().await;
+    let out = env
+        .tb(&[
+            "send",
+            "--to",
+            "a@example.com",
+            "--subject",
+            "Hi",
+            "--attach",
+            "does-not-exist.pdf",
+        ])
+        .await;
+    assert_ne!(out.code, 0);
+    assert!(out.stderr.contains("cannot attach"), "{}", out.stderr);
 }

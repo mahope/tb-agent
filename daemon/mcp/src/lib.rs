@@ -39,9 +39,16 @@ fn tool_for(spec: &OpSpec) -> Tool {
         Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
+    // A missing destructive hint means "destructive" to MCP clients, so only drafts and reads
+    // are marked harmless. Sending reaches outside the mailbox.
+    let sends = matches!(
+        spec.name.as_str(),
+        "sendMail" | "replyToMessage" | "forwardMessage"
+    );
     let annotations = ToolAnnotations::new()
         .read_only(spec.access == Access::Read)
-        .destructive(spec.access == Access::Delete);
+        .destructive(matches!(spec.access, Access::Update | Access::Delete) || sends)
+        .open_world(sends);
     Tool::new(spec.name.clone(), spec.description.clone(), schema).with_annotations(annotations)
 }
 
@@ -116,7 +123,12 @@ pub async fn serve_stdio(daemon: Daemon) -> Result<()> {
 
 /// Build the HTTP router: streamable HTTP MCP at `/mcp`. Only loopback `Host` headers are
 /// accepted unless `allow_hosts` adds more, which protects against DNS rebinding.
-pub fn http_router(daemon: Arc<Daemon>, allow_hosts: Vec<String>) -> axum::Router {
+/// With `token` set, every request needs `Authorization: Bearer <token>`.
+pub fn http_router(
+    daemon: Arc<Daemon>,
+    allow_hosts: Vec<String>,
+    token: Option<String>,
+) -> axum::Router {
     let mut hosts = vec![
         "localhost".to_owned(),
         "127.0.0.1".to_owned(),
@@ -132,22 +144,55 @@ pub fn http_router(daemon: Arc<Daemon>, allow_hosts: Vec<String>) -> axum::Route
         Arc::new(LocalSessionManager::default()),
         config,
     );
-    axum::Router::new().nest_service("/mcp", service)
+    let router = axum::Router::new().nest_service("/mcp", service);
+    match token {
+        Some(token) => router.layer(axum::middleware::from_fn(move |req, next| {
+            require_bearer(token.clone(), req, next)
+        })),
+        None => router,
+    }
+}
+
+async fn require_bearer(
+    token: String,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let supplied = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match supplied {
+        Some(given) if constant_time_eq(given.as_bytes(), token.as_bytes()) => next.run(req).await,
+        _ => axum::http::StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Serve streamable HTTP MCP on `addr` until interrupted.
-pub async fn serve_http(daemon: Daemon, addr: SocketAddr, allow_hosts: Vec<String>) -> Result<()> {
+pub async fn serve_http(
+    daemon: Daemon,
+    addr: SocketAddr,
+    allow_hosts: Vec<String>,
+    token: Option<String>,
+) -> Result<()> {
+    if token.is_none() && !addr.ip().is_loopback() {
+        anyhow::bail!("binding {addr} needs a bearer token (--token or TB_MCP_TOKEN)");
+    }
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("cannot bind {addr}"))?;
     let local = listener.local_addr()?;
     eprintln!("tb mcp: streamable HTTP on http://{local}/mcp");
-    if !local.ip().is_loopback() {
-        eprintln!(
-            "tb mcp: warning: {local} is not a loopback address; the endpoint has no authentication"
-        );
+    if token.is_none() {
+        eprintln!("tb mcp: warning: no bearer token set; any local process can use this endpoint");
     }
-    let app = http_router(Arc::new(daemon), allow_hosts);
+    let app = http_router(Arc::new(daemon), allow_hosts, token);
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

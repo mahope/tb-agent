@@ -417,8 +417,16 @@ pub struct CallArgs {
 #[derive(Args)]
 pub struct McpArgs {
     /// Serve streamable HTTP on this address instead of stdio. Loopback by default.
-    #[arg(long, value_name = "ADDR")]
+    #[arg(
+        long,
+        value_name = "ADDR",
+        num_args = 0..=1,
+        default_missing_value = "127.0.0.1:8787"
+    )]
     pub http: Option<std::net::SocketAddr>,
+    /// Require this bearer token on the HTTP endpoint. Mandatory for non-loopback addresses.
+    #[arg(long, env = "TB_MCP_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
     /// Extra Host header values to accept in HTTP mode (needed when binding a non-loopback
     /// address). Repeatable.
     #[arg(long = "allow-host")]
@@ -475,7 +483,16 @@ fn compose(p: &mut Params, c: &ComposeCommon) -> Result<()> {
         .opt("from", c.from.clone())
         .flag("isHtml", c.html);
     if !c.attach.is_empty() {
-        p.set("attachments", c.attach.clone());
+        let paths = c
+            .attach
+            .iter()
+            .map(|a| {
+                std::fs::canonicalize(a)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .with_context(|| format!("cannot attach {a}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        p.set("attachments", paths);
     }
     Ok(())
 }
