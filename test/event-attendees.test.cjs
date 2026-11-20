@@ -615,3 +615,16 @@ describe("Production event attendee serialization", () => {
     }
   });
 });
+
+it("does not update a calendar item after cancellation during provider lookup", async () => {
+  const runtime = loadCalendarRuntime();
+  const { master } = runtime.seedSeries();
+  let finishLookup;
+  runtime.calendar.getItem = () => new Promise(resolve => { finishLookup = resolve; });
+  const controller = new AbortController();
+  const request = runtime.invoke("updateEvent", { ...updateArgs, title: "Cancelled" }, controller.signal);
+  controller.abort();
+  finishLookup(master);
+  assert.match((await request).error ?? "", /abort/i);
+  assertNoWrites(runtime);
+});

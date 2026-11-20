@@ -23,7 +23,13 @@ Core message updates, moves, copies, moves to Trash, body/header reads and compo
 review windows use only MailExtension APIs. A plain draft can also be saved using
 MailExtensions when the allowlist includes every mail account. MailExtensions
 save to the identity's configured Drafts folder and offer no preflight lookup
-of that destination.
+of that destination. Core draft replacement requires an identity on the
+original draft's account. If Thunderbird saves to a different folder, the call
+reports an error and preserves the original and the newly saved draft.
+
+Calendar cancellation stops a pending operation before it hands a write to the
+provider. Writes already handed off and actions confirmed by the user in a
+review dialog are controlled by Thunderbird.
 
 Folder identifiers from the core XPI are opaque MailExtension IDs, for example
 `account1://Inbox`. Pass them to other calls as returned. The full XPI translates

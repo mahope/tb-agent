@@ -151,30 +151,43 @@ export async function dispatchCore(api, op, args, signal, settings) {
     return output;
   }
 
-  async function read(message, options) {
+  async function outerSubject(message) {
+    const raw = await messages.getHeaders(message.id).catch(() => null);
+    return text(raw?.subject?.[0]);
+  }
+
+  async function messageContent(message) {
     const full = await messages.getFull(message.id, { decrypt: settings.allowEncrypted === true });
     if (settings.allowEncrypted !== true && isProtected(full)) {
       fail("access_denied", "Protected message content is withheld.");
     }
     if (full.decryptionStatus === "fail") fail("operation_failed", "Thunderbird could not decrypt the message.");
+    return full;
+  }
+
+  async function read(message, options) {
+    const full = await messageContent(message);
+    const summary = summarize(message);
+    if (settings.allowEncrypted !== true) summary.subject = await outerSubject(message);
     if (options.rawSource) {
       const rawSource = await messages.getRaw(message.id, { decrypt: false, data_format: "BinaryString" });
-      return { id: summarize(message).id, subject: text(message.subject), rawSource };
+      return { id: summary.id, subject: summary.subject, rawSource };
     }
     const format = options.bodyFormat ?? "markdown";
     if (!["html", "text", "markdown"].includes(format)) fail("bad_request", "Unknown body format.");
     const parts = bodyParts(full);
     const html = parts.filter(part => part.contentType === "text/html").map(part => part.body).join("\n");
     const plain = parts.filter(part => part.contentType === "text/plain").map(part => part.body).join("\n");
-    const body = format === "html" && html ? html : plain || (html && await messages.convertToPlainText(html));
-    return { ...summarize(message), body: text(body), bodyFormat: html && format === "html" ? "html" : format === "markdown" ? "markdown" : "text",
+    const body = format === "html" && html ? html : plain || (html && await api.messengerUtilities.convertToPlainText(html));
+    return { ...summary, body: text(body), bodyFormat: html && format === "html" ? "html" : format === "markdown" ? "markdown" : "text",
       attachments: attachmentParts(full) };
   }
 
   async function search(recent) {
     const from = args.folderPath ? folder(args.folderPath, true) : null;
-    const roots = from ? [from] : recent ? tree.filter(item => special(item, "inbox")) : null;
-    const ids = tree.filter(item => !item.isRoot && (!roots || roots.some(root => inScope(item, root, args.includeSubfolders !== false)))).map(item => item.id);
+    const ids = tree.filter(item => !item.isRoot && (from ? inScope(item, from, args.includeSubfolders !== false) :
+      !recent || args.includeSubfolders !== false))
+      .map(item => item.id);
     const query = {};
     if (recent) query.fromDate = new Date(Date.now() - bound(args.daysBack, 7, 36500) * 86_400_000);
     if (args.startDate) query.fromDate = date(args.startDate);
@@ -187,22 +200,35 @@ export async function dispatchCore(api, op, args, signal, settings) {
     const selected = new Set(ids);
     if (ids.length) {
       for await (const message of pages(await messages.query({ ...query, folderId: ids }))) {
-        if (selected.has(message.folder.id) && matches(message, terms)) found.push(message);
+        signal.throwIfAborted();
+        if (!selected.has(message.folder.id)) continue;
+        const subject = settings.allowEncrypted === true ? message.subject : await outerSubject(message);
+        const candidate = { ...message, subject };
+        if (matches(candidate, terms)) found.push(candidate);
       }
     }
     const direction = args.sortOrder === "asc" ? 1 : -1;
     found.sort((a, b) => direction * (a.date - b.date));
-    const seen = new Set();
-    const results = found.filter(message => {
-      if (recent || args.dedupByMessageId === false || !message.headerMessageId) return true;
-      if (seen.has(message.headerMessageId)) return false;
-      seen.add(message.headerMessageId);
-      return true;
-    });
+    const seen = new Map();
+    const results = [];
+    for (const message of found) {
+      const key = !recent && args.dedupByMessageId !== false && message.headerMessageId;
+      const existing = key && seen.get(key);
+      if (existing) {
+        if (existing.message.folder.id !== message.folder.id) existing.dupLocations.add(message.folder.id);
+      } else {
+        const result = { message, dupLocations: new Set() };
+        results.push(result);
+        if (key) seen.set(key, result);
+      }
+    }
     const offset = bound(args.offset, 0, Number.MAX_SAFE_INTEGER);
     const size = bound(args.maxResults, 50, 200);
-    const rows = results.slice(offset, offset + size).map(message => summarize(message, args.fullRecipients === true));
     if (args.countOnly) return { count: results.length };
+    const rows = results.slice(offset, offset + size).map(({ message, dupLocations }) => ({
+      ...summarize(message, args.fullRecipients === true),
+      ...(dupLocations.size ? { dupLocations: [...dupLocations] } : {}),
+    }));
     if (args.offset !== undefined) return { messages: rows, totalMatches: results.length, offset, limit: size, hasMore: offset + size < results.length };
     return rows;
   }
@@ -241,6 +267,9 @@ export async function dispatchCore(api, op, args, signal, settings) {
       attachments.push({ file: new File([bytes], attachment.name, { type: attachment.contentType }) });
     }
     const account = accessible.find(item => item.identities.some(candidate => candidate.id === identity.id));
+    if (replacement && replacement.folder.accountId !== account.id) {
+      fail("bad_request", "The selected identity belongs to a different account than the original draft.");
+    }
     if (isDraft && !tree.some(item => item.accountId === account.id && special(item, "drafts"))) {
       fail("access_denied", "No Drafts folder in the selected identity's account.");
     }
@@ -263,6 +292,9 @@ export async function dispatchCore(api, op, args, signal, settings) {
       signal.throwIfAborted();
       const saved = (await compose.saveMessage(tab.id, { mode: "draft" })).messages[0];
       if (!saved || !byId.has(saved.folder?.id)) fail("operation_failed", "Check the identity's Copies & Folders settings for the saved draft.");
+      if (replacement && replacement.folder.id !== saved.folder.id) {
+        fail("operation_failed", "The new draft was saved in a different folder. The original draft was preserved.");
+      }
       if (replacement && replacement.id !== saved.id) {
         signal.throwIfAborted();
         await messages.move([replacement.id], replacementTrash.id);
@@ -333,8 +365,9 @@ export async function dispatchCore(api, op, args, signal, settings) {
         signal.throwIfAborted();
         try { results.push({ index, messageId: ref.messageId, folderPath: ref.folderPath, ...(await read(await find(ref.messageId, ref.folderPath), args)) }); }
         catch (error) {
-          if (!(error instanceof ToolError)) throw error;
-          results.push({ index, messageId: ref.messageId, folderPath: ref.folderPath, error: error.message });
+          signal.throwIfAborted();
+          results.push({ index, messageId: ref.messageId, folderPath: ref.folderPath,
+            error: error instanceof ToolError ? error.message : "Thunderbird could not read the message." });
         }
       }
       const succeeded = results.filter(result => !result.error).length;
@@ -342,9 +375,26 @@ export async function dispatchCore(api, op, args, signal, settings) {
     }
     case "displayMessage": {
       const message = await find(args.messageId, args.folderPath);
+      const displayMode = args.displayMode ?? "3pane";
+      if (!["3pane", "tab", "window"].includes(displayMode)) fail("bad_request", "Unknown display mode.");
+      let subject = text(message.subject);
+      if (settings.allowEncrypted !== true) {
+        await messageContent(message);
+        subject = await outerSubject(message);
+      }
       signal.throwIfAborted();
-      await api.messageDisplay.open({ messageId: message.id, location: args.displayMode === "tab" ? "tab" : "window" });
-      return { success: true };
+      if (displayMode === "3pane") {
+        const mailTabs = await api.mailTabs.query({ lastFocusedWindow: true });
+        const mailTab = mailTabs.find(tab => tab.active) ?? mailTabs[0];
+        if (!mailTab) fail("operation_failed", "No mail tab is available for 3pane display.");
+        signal.throwIfAborted();
+        await api.mailTabs.setSelectedMessages(mailTab.id, [message.id]);
+        signal.throwIfAborted();
+        if (!mailTab.active) await tabs.update(mailTab.id, { active: true });
+      } else {
+        await api.messageDisplay.open({ messageId: message.id, location: displayMode });
+      }
+      return { success: true, displayMode, subject };
     }
     case "updateMessage":
     case "deleteMessages": {

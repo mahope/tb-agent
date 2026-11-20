@@ -91,9 +91,20 @@ const reconnect = connectDaemon({
         signal.throwIfAborted();
       }
     }
-    const result = await experiment().callDaemonTool(op, args);
-    if (typeof result?.error === "string") throw new ToolError("operation_failed", result.error);
-    return result;
+    const integration = experiment();
+    const requestId = crypto.randomUUID();
+    const cancel = () => {
+      void integration.cancelDaemonTool(requestId).catch(() => {});
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      const result = await integration.callDaemonTool(op, args, requestId);
+      signal.throwIfAborted();
+      if (typeof result?.error === "string") throw new ToolError("operation_failed", result.error);
+      return result;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+    }
   },
   setStatus(value) {
     status = value;

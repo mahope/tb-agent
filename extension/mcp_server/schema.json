@@ -186,6 +186,21 @@
           {
             "name": "args",
             "type": "any"
+          },
+          {
+            "name": "requestId",
+            "type": "string"
+          }
+        ]
+      },
+      {
+        "name": "cancelDaemonTool",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "requestId",
+            "type": "string"
           }
         ]
       },

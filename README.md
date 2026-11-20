@@ -9,6 +9,8 @@ The extension requires **Thunderbird Release 154 or later**.
 
 ## Try it with Thunderbird
 
+Build the XPI from your checkout or download it from a matching CI run.
+
 1. Build the daemon and extension from the repository root.
 
    ```bash
@@ -471,80 +473,12 @@ The "Contact Writes" section controls **Allow contact writes**, which defaults t
 
 ---
 
-## Setup
+## Legacy HTTP setup
 
-### 1. Install the extension
-
-```bash
-git clone https://github.com/TKasperczyk/thunderbird-mcp.git
-```
-
-Install `dist/thunderbird-mcp.xpi` in Thunderbird (Tools > Add-ons > Install from File), then restart. A pre-built XPI is included in the repo -- no build step needed.
-
-**Automatic updates:** From v0.7.3 on, the add-on auto-updates through Thunderbird's add-on update check. Thunderbird downloads updates in the background and applies them on the next restart; because this add-on uses an experiment API, updates are not live hot-swapped. v0.7.3 is the last build you need to install by hand because older builds have no `update_url` and cannot auto-discover it. Thunderbird ships with `xpinstall.signatures.required=false`, so unsigned auto-updates work out of the box; a profile hardened to require signatures blocks both manual and automatic installs. If updates do not arrive, check the Add-ons gear menu and make sure **Update Add-ons Automatically** is enabled.
-
-### 2. Configure your MCP client
-
-Add to your MCP client config (e.g. `~/.claude.json` for Claude Code):
-
-```json
-{
-  "mcpServers": {
-    "thunderbird-mail": {
-      "command": "node",
-      "args": ["/absolute/path/to/thunderbird-mcp/mcp-bridge.cjs"]
-    }
-  }
-}
-```
-
-#### Connecting HTTP-capable clients directly
-
-The extension serves MCP over HTTP itself (`POST /`: `initialize`, `tools/list`, `tools/call`, notifications), so clients that support HTTP transport can skip the bridge. Read the current `port` and `token` from `connection.json`, then replace `<port>` and `<token>` below:
-
-```bash
-claude mcp add --transport http thunderbird "http://127.0.0.1:<port>/" --header "Authorization: Bearer <token>"
-```
-
-- Read the port from `connection.json` after each server restart instead of pinning `8765`. The server tries ports 8765-8774; Options shows the selected port and a notice when it differs from the default.
-- A stable token can survive restarts, but does not make the port stable. On shared machines, use the stdio bridge with automatic discovery instead of a pinned port with a stable token.
-- Responses are plain JSON; there is no SSE stream and no `Mcp-Session-Id`, both optional in the Streamable HTTP spec.
-- Path attachments are then read by the extension itself, under the same attachment policy as the bridge, and inside the Snap/Flatpak sandbox where applicable (the bridge is what makes host paths work for sandboxed installs).
-- Keep this on localhost. For a client on another machine or container, prefer an SSH tunnel or a TLS proxy bound to loopback over "Listen on all interfaces": that mode is plain HTTP, so the token and mail content cross the network unencrypted.
-
-### Sandbox-aware connection discovery
-
-The bridge re-discovers `connection.json` on every cache miss. It tries these locations in order:
-
-1. `THUNDERBIRD_MCP_CONNECTION_FILE`, if set
-2. Native temp dir: `<os.tmpdir()>/thunderbird-mcp/connection.json`
-3. macOS fallback: `/var/folders/*/*/T/thunderbird-mcp/connection.json` owned by the current user
-4. Linux Snap: Thunderbird's live `TMPDIR` from `/proc/<pid>/environ`, plus the official snap fallback under `~/Downloads/thunderbird.tmp`
-5. Linux Flatpak / Betterbird Flatpak: `$XDG_RUNTIME_DIR/app/<id>/thunderbird-mcp/connection.json` and `~/.var/app/<id>/cache/tmp/thunderbird-mcp/connection.json`
-
-This covers native installs, the official Thunderbird snap, Thunderbird Flatpak, Thunderbird Beta Flatpak, and Betterbird Flatpak without changing the extension side. If multiple sandbox candidates exist at once, the bridge tries the newest file first. Flatpak discovery accepts only these application IDs: `org.mozilla.Thunderbird`, `org.mozilla.thunderbird`, `org.mozilla.thunderbird_esr`, `net.thunderbird.Thunderbird`, and `eu.betterbird.Betterbird`. Set `THUNDERBIRD_MCP_CONNECTION_FILE` to force a single explicit path.
-
-Every connection file, including an explicit pin, must be a regular file of at most 4 KiB with a valid port and token. On Linux and macOS it must also belong to the bridge's user, have no group/other permissions (normally `0600`), and must not be a symlink. Rejected files are reported, never repaired or deleted. An invalid explicit pin does not fall back to discovery.
-
-Example override:
-
-```json
-{
-  "mcpServers": {
-    "thunderbird-mail": {
-      "command": "node",
-      "args": ["/absolute/path/to/thunderbird-mcp/mcp-bridge.cjs"],
-      "env": {
-        "THUNDERBIRD_MCP_CONNECTION_FILE": "/absolute/path/to/connection.json"
-      }
-    }
-  }
-}
-```
-
-That's it. Your AI can now access Thunderbird.
-
----
+The original HTTP server and Node MCP bridge are documented in the
+[upstream project](https://github.com/TKasperczyk/thunderbird-mcp).
+For tb-agent, build the XPI from this checkout and follow
+[Try it with Thunderbird](#try-it-with-thunderbird).
 
 ### Outgoing attachments
 
