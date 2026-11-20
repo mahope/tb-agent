@@ -97,6 +97,11 @@ fn restrict_dir(dir: &Path) {
 #[cfg(not(unix))]
 fn restrict_dir(_dir: &Path) {}
 
+/// Extension credentials are separate from the agent-facing connection file.
+pub fn extension_path(client_path: &Path) -> PathBuf {
+    client_path.with_extension("extension.json")
+}
+
 /// Default location: `$TB_CONNECTION_FILE`, else `<runtime or local data dir>/tb-agent/connection.json`.
 pub fn default_path() -> PathBuf {
     if let Some(path) = std::env::var_os(ENV_CONNECTION_FILE) {

@@ -826,5 +826,21 @@
     "folderPath"
    ]
   }
+ },
+ {
+  "name": "undo",
+  "module": "daemon",
+  "access": "update",
+  "description": "Undo an audited move, tag, mark or trash operation if the messages are unchanged",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "auditId": {
+     "type": "string",
+     "description": "Audit ID returned by the write"
+    }
+   },
+   "required": ["auditId"]
+  }
  }
 ]

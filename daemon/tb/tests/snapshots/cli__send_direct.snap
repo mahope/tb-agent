@@ -1,8 +1,9 @@
 ---
 source: tb/tests/cli.rs
-expression: "env.tb(&[\"send\", \"--to\", \"a@example.com\", \"--subject\", \"Hi\", \"--body\", \"Text\",\n\"--yes\"]).await.json()"
+expression: "audited_json(env.tb(&[\"send\", \"--to\", \"a@example.com\", \"--subject\", \"Hi\",\n\"--body\", \"Text\", \"--yes\"]).await)"
 ---
 {
+  "auditId": "<audit-id>",
   "mode": "sent",
   "success": true
 }

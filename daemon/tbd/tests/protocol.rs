@@ -397,7 +397,7 @@ async fn a_new_extension_connection_replaces_the_old_one() {
     let (daemon, first) = TestDaemon::with_extension(FakeConfig::default())
         .await
         .unwrap();
-    let second = FakeExtension::connect(daemon.info(), FakeConfig::default())
+    let second = FakeExtension::connect(daemon.extension_info(), FakeConfig::default())
         .await
         .unwrap();
     let c = client(daemon.info()).await;

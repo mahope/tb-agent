@@ -23,6 +23,9 @@ clap.workspace = true
 futures-util.workspace = true
 rand.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+dirs.workspace = true
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 tb-protocol.workspace = true
 tokio.workspace = true
 tracing.workspace = true

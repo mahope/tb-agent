@@ -6,6 +6,25 @@ use common::{Env, command_for, run};
 use serde_json::{Value, json};
 use tb_testkit::{BIG_BODY_BYTES, BIG_MESSAGE, INBOX, PERSONAL_INBOX, TRASH, TestDaemon};
 
+fn audited_json(out: common::Output) -> Value {
+    let mut result = out.json();
+    let audit_id = result["auditId"]
+        .as_str()
+        .expect("write returns an audit ID");
+    assert_eq!(audit_id.len(), 64);
+    assert!(audit_id.bytes().all(|b| b.is_ascii_hexdigit()));
+    result["auditId"] = json!("<audit-id>");
+    result
+}
+
+fn public_call(env: &Env) -> (String, Value) {
+    let (op, mut params) = env.last_call();
+    let params_map = params.as_object_mut().unwrap();
+    assert!(params_map.remove("_scope").is_some());
+    params_map.remove("_expected");
+    (op, params)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accounts() {
     let env = Env::new().await;
@@ -40,7 +59,7 @@ async fn search() {
             .await
             .json()
     );
-    let (op, params) = env.last_call();
+    let (op, params) = public_call(&env);
     assert_eq!(op, "searchMessages");
     assert_eq!(params, json!({"query": "", "maxResults": 2, "offset": 1}));
 }
@@ -51,7 +70,7 @@ async fn recent() {
     let out = env.tb(&["recent", "--days", "30", "--limit", "10"]).await;
     assert_eq!(out.json().as_array().unwrap().len(), 4);
     assert_eq!(
-        env.last_call(),
+        public_call(&env),
         (
             "getRecentMessages".into(),
             json!({"daysBack": 30, "maxResults": 10})
@@ -132,9 +151,9 @@ async fn mutations_send_the_expected_parameters() {
         ])
         .await;
     assert_eq!(out.code, 0, "{}", out.stderr);
-    insta::assert_json_snapshot!("mark", out.json());
+    insta::assert_json_snapshot!("mark", audited_json(out));
     assert_eq!(
-        env.last_call(),
+        public_call(&env),
         (
             "updateMessage".into(),
             json!({"messageId": "m1@example.com", "folderPath": INBOX, "read": true, "flagged": true})
@@ -158,7 +177,7 @@ async fn mutations_send_the_expected_parameters() {
     ])
     .await;
     assert_eq!(
-        env.last_call().1,
+        public_call(&env).1,
         json!({"messageIds": ["m1@example.com", "m2@example.com"], "folderPath": INBOX, "addTags": ["$label1"], "removeTags": ["x"]})
     );
 
@@ -168,23 +187,19 @@ async fn mutations_send_the_expected_parameters() {
 
     insta::assert_json_snapshot!(
         "trash",
-        env.tb(&[
-            "trash",
-            "m1@example.com",
-            "m2@example.com",
-            "--folder",
-            INBOX
-        ])
-        .await
-        .json()
+        audited_json(
+            env.tb(&["trash", "m2@example.com", BIG_MESSAGE, "--folder", INBOX])
+                .await
+        )
     );
     assert_eq!(env.last_call().1["trash"], true);
 
     insta::assert_json_snapshot!(
         "delete",
-        env.tb(&["delete", "m1@example.com", "--folder", INBOX])
-            .await
-            .json()
+        audited_json(
+            env.tb(&["delete", "m1@example.com", "--folder", TRASH])
+                .await
+        )
     );
     assert_eq!(env.last_call().0, "deleteMessages");
 }
@@ -201,41 +216,43 @@ async fn compose_commands() {
 
     insta::assert_json_snapshot!(
         "draft",
-        env.tb(&[
-            "draft",
-            "--to",
-            "a@example.com",
-            "--subject",
-            "Hi",
-            "--body",
-            "Text",
-            "--attach",
-            attachment.to_str().unwrap()
-        ])
-        .await
-        .json()
+        audited_json(
+            env.tb(&[
+                "draft",
+                "--to",
+                "a@example.com",
+                "--subject",
+                "Hi",
+                "--body",
+                "Text",
+                "--attach",
+                attachment.to_str().unwrap()
+            ])
+            .await
+        )
     );
     assert_eq!(
-        env.last_call(),
+        public_call(&env),
         (
             "saveDraft".into(),
-            json!({"to": "a@example.com", "subject": "Hi", "body": "Text", "attachments": [attachment_abs]})
+            json!({"to": "a@example.com", "subject": "Hi", "body": "Text", "attachments": [attachment_abs], "from": "id1"})
         )
     );
 
     insta::assert_json_snapshot!(
         "send_review",
-        env.tb(&[
-            "send",
-            "--to",
-            "a@example.com",
-            "--subject",
-            "Hi",
-            "--body",
-            "Text"
-        ])
-        .await
-        .json()
+        audited_json(
+            env.tb(&[
+                "send",
+                "--to",
+                "a@example.com",
+                "--subject",
+                "Hi",
+                "--body",
+                "Text"
+            ])
+            .await
+        )
     );
     assert!(
         env.last_call().1.get("skipReview").is_none(),
@@ -244,18 +261,19 @@ async fn compose_commands() {
 
     insta::assert_json_snapshot!(
         "send_direct",
-        env.tb(&[
-            "send",
-            "--to",
-            "a@example.com",
-            "--subject",
-            "Hi",
-            "--body",
-            "Text",
-            "--yes"
-        ])
-        .await
-        .json()
+        audited_json(
+            env.tb(&[
+                "send",
+                "--to",
+                "a@example.com",
+                "--subject",
+                "Hi",
+                "--body",
+                "Text",
+                "--yes"
+            ])
+            .await
+        )
     );
     assert_eq!(env.last_call().1["skipReview"], true);
 
@@ -400,4 +418,50 @@ async fn missing_attachment_fails_before_sending() {
         .await;
     assert_ne!(out.code, 0);
     assert!(out.stderr.contains("cannot attach"), "{}", out.stderr);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_restores_folders_and_flags() {
+    let env = Env::new().await;
+    let id = "m1@example.com";
+    for args in [
+        vec!["move", id, "--folder", INBOX, "--to", TRASH],
+        vec!["tag", id, "--folder", INBOX, "--add", "$label1"],
+        vec!["mark", id, "--folder", INBOX, "--read", "--flag"],
+        vec!["trash", id, "--folder", INBOX],
+    ] {
+        let result = env.tb(&args).await.json();
+        let audit_id = result["auditId"].as_str().unwrap();
+        let log = std::fs::read_to_string(env.daemon.dir.join("audit.jsonl")).unwrap();
+        let intent = log
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|entry| entry["auditId"] == audit_id && entry["event"] == "intent")
+            .unwrap();
+        assert_eq!(intent["accounts"], json!(["account1"]));
+        assert_eq!(
+            intent["previous"],
+            json!([{
+                "messageId": id, "folderPath": INBOX, "read": false, "flagged": false, "tags": []
+            }])
+        );
+        assert!(intent["timeMs"].is_u64());
+        if args[0] == "move" || args[0] == "trash" {
+            assert_eq!(
+                env.tb(&["headers", id, "--folder", TRASH]).await.json()["id"],
+                id
+            );
+        }
+        let undo = env.tb(&["undo", audit_id]).await;
+        assert_eq!(undo.code, 0, "{}", undo.stderr);
+        let header = env.tb(&["headers", id, "--folder", INBOX]).await.json();
+        assert_eq!(header["id"], id);
+        assert_eq!(header["read"], false);
+        assert_eq!(header["flagged"], false);
+        assert_eq!(header["tags"], json!([]));
+        assert_eq!(
+            env.tb(&["undo", audit_id]).await.error_json()["error"]["code"],
+            "undo_unavailable"
+        );
+    }
 }

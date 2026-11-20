@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use tb_protocol::ConnectionInfo;
-use tb_protocol::connection::default_path;
+use tb_protocol::connection::{default_path, extension_path};
 use tb_testkit::{FakeConfig, FakeExtension};
 
 #[derive(Parser)]
@@ -22,7 +22,7 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let path = args.connection_file.unwrap_or_else(default_path);
-    let info = ConnectionInfo::read(&path)?;
+    let info = ConnectionInfo::read(&extension_path(&path))?;
     let mut config = FakeConfig::default();
     if args.experiment_modules {
         config.modules.push("experiment.attachments".into());

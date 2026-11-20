@@ -56,6 +56,8 @@ pub enum Command {
     Move(MoveArgs),
     /// Move messages to Trash.
     Trash(IdsFolder),
+    /// Undo a move, tag, mark or trash operation by audit ID.
+    Undo { audit_id: String },
     /// Delete messages (drafts go to Trash).
     Delete(IdsFolder),
     /// Save a draft without sending.
@@ -523,6 +525,10 @@ impl Command {
         let op = match self {
             Command::Ops | Command::Mcp(_) => return Ok(None),
             Command::Status => "status",
+            Command::Undo { audit_id } => {
+                p.set("auditId", audit_id.clone());
+                "undo"
+            }
             Command::Accounts => "listAccounts",
             Command::Folders(a) => {
                 p.opt("accountId", a.account.clone())

@@ -21,13 +21,38 @@ impl TestDaemon {
     }
 
     pub async fn start_with(request_timeout: Duration) -> Result<Self> {
+        Self::start_configured(
+            request_timeout,
+            Some(
+                r#"
+[accounts.account1]
+access = "full"
+permissions = ["read", "move", "tag", "trash", "send"]
+[accounts.account2]
+access = "full"
+permissions = ["read", "move", "tag", "trash", "send"]
+"#,
+            ),
+        )
+        .await
+    }
+
+    pub async fn with_policy(policy: Option<&str>) -> Result<Self> {
+        Self::start_configured(Duration::from_secs(30), policy).await
+    }
+
+    async fn start_configured(request_timeout: Duration, policy: Option<&str>) -> Result<Self> {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("tb-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
+        let policy_file = dir.join("policy.toml");
+        std::fs::write(&policy_file, policy.unwrap_or(""))?;
         let server = tbd::start(tbd::Config {
             connection_file: Some(dir.join("connection.json")),
             request_timeout,
+            audit_file: Some(dir.join("audit.jsonl")),
+            policy_file: Some(policy_file),
             ..tbd::Config::default()
         })
         .await?;
@@ -41,6 +66,14 @@ impl TestDaemon {
         &self.server.as_ref().expect("server is running").info
     }
 
+    pub fn extension_info(&self) -> &ConnectionInfo {
+        &self
+            .server
+            .as_ref()
+            .expect("server is running")
+            .extension_info
+    }
+
     pub fn connection_file(&self) -> PathBuf {
         self.dir.join("connection.json")
     }
@@ -48,7 +81,7 @@ impl TestDaemon {
     /// Daemon plus a connected fake extension.
     pub async fn with_extension(config: FakeConfig) -> Result<(Self, FakeExtension)> {
         let daemon = Self::start().await?;
-        let ext = FakeExtension::connect(daemon.info(), config).await?;
+        let ext = FakeExtension::connect(daemon.extension_info(), config).await?;
         Ok((daemon, ext))
     }
 }

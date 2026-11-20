@@ -18,6 +18,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 
+use tb_protocol::frame::{Identity, Inventory};
+
 pub const INBOX: &str = "imap://work@mail.example.com/INBOX";
 pub const DRAFTS: &str = "imap://work@mail.example.com/Drafts";
 pub const TRASH: &str = "imap://work@mail.example.com/Trash";
@@ -77,6 +79,7 @@ impl FakeExtension {
                 thunderbird: Some("154.0".into()),
                 extension_version: Some("0.0.0-fake".into()),
                 modules: config.modules.clone(),
+                inventory: Some(inventory()),
             }),
         });
         sink.send(Message::text(hello.to_text())).await?;
@@ -94,7 +97,7 @@ impl FakeExtension {
         let calls: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
         let seen = Arc::clone(&calls);
         let task = tokio::spawn(async move {
-            let mailbox = Mailbox::new();
+            let mut mailbox = Mailbox::new();
             while let Some(Ok(message)) = stream.next().await {
                 let Message::Text(text) = message else {
                     continue;
@@ -107,6 +110,21 @@ impl FakeExtension {
                     continue; // never answers, to test timeouts, cancels and disconnects
                 }
                 let frames = match mailbox.handle(&op, &params) {
+                    Ok(result)
+                        if [
+                            "snapshotMessages",
+                            "restoreMessages",
+                            "updateMessage",
+                            "deleteMessages",
+                            "saveDraft",
+                            "sendMail",
+                            "replyToMessage",
+                            "forwardMessage",
+                        ]
+                        .contains(&op.as_str()) =>
+                    {
+                        vec![Frame::ok(&id, result)]
+                    }
                     Ok(result) => result_frames(&id, &result, &config),
                     Err((code, message)) => vec![Frame::err(&id, &code, message)],
                 };
@@ -160,6 +178,67 @@ fn result_frames(id: &str, result: &Value, config: &FakeConfig) -> Vec<Frame> {
         streamed: true,
     });
     frames
+}
+
+fn inventory() -> Inventory {
+    Inventory {
+        accounts: ["account1", "account2"].map(str::to_owned).into(),
+        folders: [
+            (INBOX, "account1"),
+            (DRAFTS, "account1"),
+            (TRASH, "account1"),
+            (PERSONAL_INBOX, "account2"),
+        ]
+        .into_iter()
+        .map(|(path, account)| (path.into(), account.into()))
+        .collect(),
+        identities: [
+            (
+                "id1".into(),
+                Identity {
+                    account_id: "account1".into(),
+                    email: "mads@example.com".into(),
+                    drafts_folder: Some(DRAFTS.into()),
+                    sent_folder: None,
+                },
+            ),
+            (
+                "id2".into(),
+                Identity {
+                    account_id: "account2".into(),
+                    email: "me@home.example.net".into(),
+                    drafts_folder: None,
+                    sent_folder: None,
+                },
+            ),
+        ]
+        .into(),
+        default_identity: Some("id1".into()),
+        trash_folders: [("account1".into(), TRASH.into())].into(),
+    }
+}
+
+fn scoped(params: &Value, account: &str) -> bool {
+    params["_scope"]["accounts"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id == account))
+}
+
+fn headers_only(params: &Value, account: &str) -> bool {
+    params["_scope"]["headers"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id == account))
+}
+
+fn message_state(message: &Value) -> Value {
+    json!({
+        "messageId": message["id"], "folderPath": message["folderPath"],
+        "read": message["read"], "flagged": message["flagged"], "tags": message["tags"],
+    })
+}
+
+fn conflict() -> Failure {
+    ("conflict".into(), "mailbox state changed".into())
 }
 
 struct Mailbox {
@@ -236,14 +315,52 @@ impl Mailbox {
             .find(|m| m["id"] == id && m["folderPath"] == folder)
     }
 
-    fn handle(&self, op: &str, params: &Value) -> Result<Value, Failure> {
+    fn state_indexes(&self, expected: &[Value]) -> Result<Vec<usize>, Failure> {
+        expected
+            .iter()
+            .map(|state| {
+                let index = self.message_index(&state["messageId"], &state["folderPath"])?;
+                if message_state(&self.messages[index]) != *state {
+                    return Err(conflict());
+                }
+                Ok(index)
+            })
+            .collect()
+    }
+
+    fn message_index(&self, id: &Value, folder: &Value) -> Result<usize, Failure> {
+        let mut matches = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m["id"] == *id && m["folderPath"] == *folder);
+        let (index, _) = matches.next().ok_or_else(|| not_found("message"))?;
+        if matches.next().is_some() {
+            return Err(conflict());
+        }
+        Ok(index)
+    }
+
+    fn handle(&mut self, op: &str, params: &Value) -> Result<Value, Failure> {
+        let inventory = inventory();
+        let folder_owner = |message: &Value| {
+            message["folderPath"]
+                .as_str()
+                .and_then(|path| inventory.folders.get(path))
+        };
+        let can_access = |m: &Value| folder_owner(m).is_some_and(|id| scoped(params, id));
         match op {
-            "listAccounts" => Ok(json!([
-                {"id": "account1", "name": "Work", "type": "imap",
-                 "identities": [{"id": "id1", "name": "Mads", "email": "mads@example.com"}]},
-                {"id": "account2", "name": "Personal", "type": "imap",
-                 "identities": [{"id": "id2", "name": "Mads", "email": "me@home.example.net"}]},
-            ])),
+            "listAccounts" => Ok(Value::Array(
+                vec![
+                    json!({"id": "account1", "name": "Work", "type": "imap",
+                 "identities": [{"id": "id1", "name": "Mads", "email": "mads@example.com"}]}),
+                    json!({"id": "account2", "name": "Personal", "type": "imap",
+                 "identities": [{"id": "id2", "name": "Mads", "email": "me@home.example.net"}]}),
+                ]
+                .into_iter()
+                .filter(|account| scoped(params, account["id"].as_str().unwrap()))
+                .collect(),
+            )),
             "listFolders" => {
                 let all = [
                     ("account1", "Inbox", INBOX, 3, 1),
@@ -254,7 +371,8 @@ impl Mailbox {
                 let wanted = params.get("accountId").and_then(Value::as_str);
                 let folders: Vec<Value> = all
                     .iter()
-                    .filter(|f| wanted.is_none_or(|w| w == f.0))
+                    .filter(|f| scoped(params, f.0) && wanted.is_none_or(|w| w == f.0))
+                    .filter(|f| params["folderPath"].as_str().is_none_or(|path| f.2 == path))
                     .map(|(account, name, path, total, unread)| {
                         json!({"accountId": account, "name": name, "path": path,
                                "totalMessages": total, "unreadMessages": unread})
@@ -276,6 +394,7 @@ impl Mailbox {
                 let hits: Vec<Value> = self
                     .messages
                     .iter()
+                    .filter(|m| can_access(m))
                     .filter(|m| folder.is_none_or(|f| m["folderPath"] == f))
                     .filter(|m| !unread_only || m["read"] == false)
                     .filter(|m| {
@@ -315,7 +434,13 @@ impl Mailbox {
                 Ok(Value::Array(hits))
             }
             "getMessage" => {
-                let m = self.find(params).ok_or_else(|| not_found("message"))?;
+                let m = self
+                    .find(params)
+                    .filter(|m| can_access(m))
+                    .ok_or_else(|| not_found("message"))?;
+                if folder_owner(m).is_some_and(|id| headers_only(params, id)) {
+                    return Ok(m.clone());
+                }
                 let mut out = m.clone();
                 if params.get("rawSource").and_then(Value::as_bool) == Some(true) {
                     return Ok(
@@ -341,8 +466,13 @@ impl Mailbox {
             "getMessages" => {
                 let items = params["messages"].as_array().cloned().unwrap_or_default();
                 let mut out = Vec::new();
-                for item in &items {
-                    out.push(match self.handle("getMessage", item) {
+                for mut item in items {
+                    for key in ["_scope", "rawSource", "bodyFormat", "saveAttachments"] {
+                        if let Some(value) = params.get(key) {
+                            item[key] = value.clone();
+                        }
+                    }
+                    out.push(match self.handle("getMessage", &item) {
                         Ok(v) => v,
                         Err((code, message)) => {
                             json!({"error": {"code": code, "message": message}})
@@ -353,6 +483,7 @@ impl Mailbox {
             }
             "getMessageHeaders" => self
                 .find(params)
+                .filter(|m| can_access(m))
                 .cloned()
                 .ok_or_else(|| not_found("message")),
             "batchGetMessageHeaders" => {
@@ -365,23 +496,128 @@ impl Mailbox {
                     self.messages
                         .iter()
                         .filter(|m| {
-                            m["folderPath"] == folder
+                            can_access(m)
+                                && m["folderPath"] == folder
                                 && ids.contains(&m["id"].as_str().unwrap_or(""))
                         })
                         .cloned()
                         .collect(),
                 ))
             }
+            "snapshotMessages" => {
+                let ids = params["messageIds"].as_array().ok_or_else(conflict)?;
+                let states = ids
+                    .iter()
+                    .map(|id| {
+                        let index = self.message_index(id, &params["folderPath"])?;
+                        let message = &self.messages[index];
+                        if !can_access(message) {
+                            return Err(conflict());
+                        }
+                        Ok(message_state(message))
+                    })
+                    .collect::<Result<Vec<_>, Failure>>()?;
+                Ok(json!(states))
+            }
             "updateMessage" => {
-                let count = params
-                    .get("messageIds")
-                    .and_then(Value::as_array)
-                    .map_or(usize::from(params.get("messageId").is_some()), Vec::len);
-                Ok(json!({"success": true, "updated": count}))
+                let expected = params["_expected"].as_array().ok_or_else(conflict)?;
+                let indexes = self.state_indexes(expected)?;
+                let target = params["moveTo"]
+                    .as_str()
+                    .or(params["copyTo"].as_str())
+                    .or((params["trash"] == true).then_some(TRASH));
+                if let Some(target) = target {
+                    for &index in &indexes {
+                        let current = &self.messages[index];
+                        if current["folderPath"] != target
+                            && self
+                                .messages
+                                .iter()
+                                .any(|m| m["folderPath"] == target && m["id"] == current["id"])
+                        {
+                            return Err(conflict());
+                        }
+                    }
+                }
+                let mut after = Vec::new();
+                for index in indexes {
+                    let mut message = self.messages[index].clone();
+                    for flag in ["read", "flagged"] {
+                        if let Some(value) = params.get(flag) {
+                            message[flag] = value.clone();
+                        }
+                    }
+                    let mut tags: std::collections::BTreeSet<String> =
+                        serde_json::from_value(message["tags"].clone()).unwrap();
+                    for tag in params["addTags"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        tags.insert(tag.to_owned());
+                    }
+                    for tag in params["removeTags"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        tags.remove(tag);
+                    }
+                    message["tags"] = json!(tags);
+                    if let Some(target) = target {
+                        message["folderPath"] = json!(target);
+                    }
+                    after.push(message_state(&message));
+                    if params.get("copyTo").is_some() {
+                        self.messages.push(message);
+                    } else {
+                        self.messages[index] = message;
+                    }
+                }
+                Ok(json!({"success": true, "updated": after.len(), "_after": after}))
             }
             "deleteMessages" => {
-                let count = params["messageIds"].as_array().map_or(0, Vec::len);
-                Ok(json!({"success": true, "deleted": count}))
+                let expected = params["_expected"].as_array().ok_or_else(conflict)?;
+                let mut indexes = self.state_indexes(expected)?;
+                indexes.sort_unstable_by(|a, b| b.cmp(a));
+                for &index in &indexes {
+                    self.messages.remove(index);
+                }
+                Ok(json!({"success": true, "deleted": indexes.len()}))
+            }
+            "restoreMessages" => {
+                let expected = params["expected"].as_array().ok_or_else(conflict)?;
+                let restore = params["restore"].as_array().ok_or_else(conflict)?;
+                let indexes = self.state_indexes(expected)?;
+                if indexes.len() != restore.len() {
+                    return Err(conflict());
+                }
+                let mut updates = Vec::new();
+                for (index, expected) in indexes.into_iter().zip(expected) {
+                    let state = restore
+                        .iter()
+                        .find(|m| m["messageId"] == expected["messageId"])
+                        .ok_or_else(conflict)?;
+                    if !can_access(state)
+                        || !can_access(expected)
+                        || self.messages.iter().enumerate().any(|(i, m)| {
+                            i != index
+                                && m["id"] == state["messageId"]
+                                && m["folderPath"] == state["folderPath"]
+                        })
+                    {
+                        return Err(conflict());
+                    }
+                    updates.push((index, state));
+                }
+                for (index, state) in updates {
+                    for key in ["folderPath", "read", "flagged", "tags"] {
+                        self.messages[index][key] = state[key].clone();
+                    }
+                }
+                Ok(json!({"success": true, "updated": restore.len()}))
             }
             "saveDraft" => Ok(
                 json!({"success": true, "folderPath": DRAFTS, "messageId": "draft-1@example.com"}),

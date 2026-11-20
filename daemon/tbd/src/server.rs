@@ -13,15 +13,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
-use tb_protocol::connection::default_path;
+use tb_protocol::connection::{default_path, extension_path};
 use tb_protocol::{
     ConnectionInfo, Frame, Hello, MAX_FRAME_BYTES, PROTOCOL_VERSION, Role, WS_PATH, Welcome, code,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::auth;
 use crate::hub::{Hub, Out, Tx};
+use crate::{audit::Audit, auth, policy::Policy};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -33,6 +33,8 @@ pub struct Config {
     pub connection_file: Option<PathBuf>,
     /// Default time an operation may take before the client gets a `timeout` error.
     pub request_timeout: Duration,
+    pub policy_file: Option<PathBuf>,
+    pub audit_file: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -41,6 +43,8 @@ impl Default for Config {
             bind: SocketAddr::from(([127, 0, 0, 1], 0)),
             connection_file: None,
             request_timeout: Duration::from_secs(120),
+            policy_file: None,
+            audit_file: None,
         }
     }
 }
@@ -48,6 +52,7 @@ impl Default for Config {
 pub struct RunningServer {
     pub info: ConnectionInfo,
     pub connection_file: PathBuf,
+    pub extension_info: ConnectionInfo,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
@@ -77,6 +82,21 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             config.bind
         );
     }
+    let policy_path = match &config.policy_file {
+        Some(path) => path.clone(),
+        None => dirs::config_dir()
+            .context("cannot determine account policy directory")?
+            .join("tb-agent/policy.toml"),
+    };
+    let policy = Policy::load(&policy_path, config.policy_file.is_some())?;
+    let audit_path = config.audit_file.map(Ok).unwrap_or_else(|| {
+        Ok::<_, anyhow::Error>(
+            dirs::data_local_dir()
+                .context("cannot determine audit directory")?
+                .join("tb-agent/audit.jsonl"),
+        )
+    })?;
+    let audit = Audit::open(&audit_path)?;
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .with_context(|| format!("cannot bind {}", config.bind))?;
@@ -90,15 +110,31 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         pid: std::process::id(),
     };
     let connection_file = config.connection_file.unwrap_or_else(default_path);
-    info.write(&connection_file)?;
+    let extension_file = extension_path(&connection_file);
+    let extension_info = ConnectionInfo {
+        token: auth::new_token(),
+        ..info.clone()
+    };
+    extension_info.write(&extension_file)?;
+    if let Err(error) = info.write(&connection_file) {
+        let _ = std::fs::remove_file(&extension_file);
+        return Err(error.into());
+    }
 
-    let hub = Arc::new(Hub::new(token, config.request_timeout));
+    let hub = Arc::new(Hub::new(
+        token,
+        extension_info.token.clone(),
+        config.request_timeout,
+        policy,
+        audit,
+    ));
     let app = Router::new()
         .route(WS_PATH, get(ws_handler))
         .with_state(hub);
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let file = connection_file.clone();
     let own_token = info.token.clone();
+    let extension_token = extension_info.token.clone();
     let task = tokio::spawn(async move {
         let served = axum::serve(listener, app).with_graceful_shutdown(async {
             let _ = shutdown_rx.await;
@@ -106,14 +142,17 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         if let Err(err) = served.await {
             tracing::error!("server stopped: {err}");
         }
-        // Only remove the file if it is still ours.
-        if ConnectionInfo::read(&file).is_ok_and(|c| c.token == own_token) {
-            let _ = std::fs::remove_file(&file);
+        for (path, token) in [(file, own_token), (extension_file, extension_token)] {
+            // Only remove a file if it is still ours.
+            if ConnectionInfo::read(&path).is_ok_and(|c| c.token == token) {
+                let _ = std::fs::remove_file(&path);
+            }
         }
     });
     Ok(RunningServer {
         info,
         connection_file,
+        extension_info,
         shutdown: Some(shutdown_tx),
         task: Some(task),
     })
@@ -127,7 +166,12 @@ async fn ws_handler(
     if !auth::origin_allowed(&headers) {
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
-    let presented = auth::check(&headers, &hub.token);
+    let extension = auth::check(&headers, &hub.extension_token);
+    let (role, presented) = if extension.valid {
+        (Role::Extension, extension)
+    } else {
+        (Role::Client, auth::check(&headers, &hub.token))
+    };
     if !presented.valid {
         return (StatusCode::UNAUTHORIZED, "missing or wrong token").into_response();
     }
@@ -138,7 +182,7 @@ async fn ws_handler(
     upgrade
         .max_message_size(MAX_FRAME_BYTES)
         .max_frame_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(hub, socket))
+        .on_upgrade(move |socket| handle_socket(hub, socket, role))
 }
 
 /// Next protocol frame, or `None` when the peer closed. Errors for malformed input.
@@ -159,7 +203,7 @@ async fn read_frame(
     }
 }
 
-async fn handle_socket(hub: Arc<Hub>, socket: WebSocket) {
+async fn handle_socket(hub: Arc<Hub>, socket: WebSocket, role: Role) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx): (Tx, _) = mpsc::unbounded_channel();
 
@@ -196,7 +240,7 @@ async fn handle_socket(hub: Arc<Hub>, socket: WebSocket) {
             return;
         }
     };
-    if let Err(reason) = accept_hello(&hub, &tx, &hello) {
+    if let Err(reason) = accept_hello(role, &hello) {
         let _ = tx.send(Out::Close(1008, reason));
         let _ = writer.await;
         return;
@@ -263,7 +307,10 @@ fn welcome(hub: &Hub) -> Welcome {
     }
 }
 
-fn accept_hello(_hub: &Hub, _tx: &Tx, hello: &Hello) -> Result<(), &'static str> {
+fn accept_hello(role: Role, hello: &Hello) -> Result<(), &'static str> {
+    if hello.role != role {
+        return Err("credential does not match peer role");
+    }
     if hello.protocol != PROTOCOL_VERSION {
         return Err("unsupported protocol version");
     }

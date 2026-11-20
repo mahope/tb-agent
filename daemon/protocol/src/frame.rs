@@ -1,5 +1,7 @@
 //! Frame types exchanged over the WebSocket.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,6 +16,9 @@ pub mod code {
     pub const CANCELLED: &str = "cancelled";
     pub const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
     pub const PROTOCOL: &str = "protocol_error";
+    pub const PERMISSION_DENIED: &str = "permission_denied";
+    pub const AUDIT_FAILED: &str = "audit_failed";
+    pub const UNDO_UNAVAILABLE: &str = "undo_unavailable";
     pub const INTERNAL: &str = "internal";
 }
 
@@ -41,6 +46,29 @@ pub struct Capabilities {
     /// modules, for example `experiment.attachments`, may need Experiment APIs.
     #[serde(default)]
     pub modules: Vec<String>,
+    /// Private routing inventory, supplied only by the authenticated extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<Inventory>,
+}
+
+/// Exact Thunderbird resource ownership for one extension connection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Inventory {
+    pub accounts: Vec<String>,
+    pub folders: BTreeMap<String, String>,
+    pub identities: BTreeMap<String, Identity>,
+    pub default_identity: Option<String>,
+    pub trash_folders: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    pub account_id: String,
+    pub email: String,
+    pub drafts_folder: Option<String>,
+    pub sent_folder: Option<String>,
 }
 
 impl Capabilities {
