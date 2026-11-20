@@ -4,7 +4,7 @@ Keep changes focused and follow the surrounding code. Search for existing helper
 
 ## Build
 
-Use Node.js 22 or newer for development. On Linux/macOS, run `bash scripts/build.sh` (requires `zip`). Alternatively, including on Windows, run `node scripts/build-xpi.cjs`. Both produce `dist/thunderbird-mcp.xpi`. Install it from Thunderbird's Add-ons manager and restart Thunderbird to load the changes.
+Use Node.js 22 or newer for development. On Linux/macOS, run `bash scripts/build.sh` (requires `zip`). Alternatively, including on Windows, run `node scripts/build-xpi.cjs`. Both produce the full `dist/thunderbird-mcp.xpi`. Run `node scripts/build-xpi.cjs --core` to build `dist/tb-agent-core.xpi` without Experiments. See the [upstream merge workflow](README.md#upstream). Install it from Thunderbird's Add-ons manager and restart Thunderbird to load the changes.
 
 ## Test and lint
 
@@ -14,11 +14,11 @@ The Node test suite needs no installed dependencies. **When a live Thunderbird i
 mkdir -p /tmp/thunderbird-mcp-tests && TMPDIR=/tmp/thunderbird-mcp-tests npm test
 ```
 
-Keep that directory separate from Thunderbird's temporary directory. For linting, install only the development dependencies without lifecycle scripts, then run ESLint:
+Keep that directory separate from Thunderbird's temporary directory. For linting, use Node.js 22.13+ (22.x) or 24+ and install the locked development dependencies without lifecycle scripts:
 
 ```sh
-npm install --no-package-lock --ignore-scripts
-npx eslint .
+npm ci --ignore-scripts
+npm run lint
 ```
 
 For Experiment API changes, follow the existing marker + `node:vm` tests that execute production code with Thunderbird services stubbed. Note any manual Thunderbird checks and the version/channel used in your PR.

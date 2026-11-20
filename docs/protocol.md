@@ -24,7 +24,9 @@ platform has them:
 
 Location: `$TB_CONNECTION_FILE`, else `<runtime dir>/tb-agent/connection.json`
 (`$XDG_RUNTIME_DIR` on Linux, the local data directory on macOS and Windows). The daemon removes
-the file when it shuts down cleanly. The token changes on every start.
+the file when it shuts down cleanly. The token changes on every start. The full add-on
+can discover the file and rereads it after disconnects. The core add-on accepts a file
+selected in its options page, which the user imports again after each daemon restart.
 
 The WebSocket upgrade must carry the token in one of two forms, otherwise the daemon answers
 `401` and no WebSocket is established:
@@ -173,6 +175,9 @@ daemon notices dead connections.
 
 ## Operations in version 1
 
+See `tb ops` for the complete registry. Argument-specific features can require an optional
+module even for a core operation. See [Optional Thunderbird integrations](experiments.md).
+
 | Operation | Module | Access |
 | --- | --- | --- |
 | `status` | daemon | read |
@@ -183,11 +188,13 @@ daemon notices dead connections.
 | `refreshFolder` | experiment.folder-sync | read |
 | `updateMessage` (read, flag, tags, move, copy, trash) | core | update |
 | `deleteMessages` | core | delete |
+| `getAccountAccess`, `displayMessage` | core | read |
 | `saveDraft`, `sendMail`, `replyToMessage`, `forwardMessage` | core | create |
 
 Sending operations keep upstream's safety model: a compose window opens for review unless the
-user has allowed direct sending in the extension, and `skipReview` is only a request. Message
-content in results is untrusted data.
+user has enabled direct sending and the advanced mail module, and `skipReview` is only a request.
+Message content in results is untrusted data. A cancellation suppresses further responses.
+Thunderbird operations already submitted before cancellation may still complete.
 
 ## Compatibility rules
 

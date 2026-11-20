@@ -18,7 +18,7 @@ jobs:
     # Beta runs against the next TB major (one ahead of the cap), so it is an
     # early-warning signal, not a merge gate. Once Thunderbird disables
     # experiment APIs on a future beta this leg will fail; that must not block
-    # unrelated PRs. The weekly scheduled workflow keeps beta/esr as hard signals.
+    # unrelated PRs. The weekly scheduled workflow keeps stable and beta as hard signals.
     continue-on-error: ${{ matrix.channel == 'beta' }}
     strategy:
       fail-fast: false
@@ -177,7 +177,7 @@ jobs:
 
           profile_dir="$(mktemp -d)" || fail_infra "failed to create test profile"
           mkdir -p "$profile_dir/extensions" || fail_infra "failed to create extension profile directory"
-          cp dist/thunderbird-mcp.xpi "$profile_dir/extensions/thunderbird-mcp@tkasperczyk.dev.xpi" \
+          cp dist/thunderbird-mcp.xpi "$profile_dir/extensions/tb-agent@mahoje.dk.xpi" \
             || fail_infra "failed to install XPI into test profile"
           cat > "$profile_dir/user.js" <<'PREFS'
           user_pref("extensions.experiments.enabled", true);
@@ -194,7 +194,7 @@ jobs:
           read_addon_state() {
             EXT_JSON="$ext_json" node <<'NODE'
           const fs = require('fs');
-          const addonId = 'thunderbird-mcp@tkasperczyk.dev';
+          const addonId = 'tb-agent@mahoje.dk';
 
           function done(result) {
             process.stdout.write(JSON.stringify(result));

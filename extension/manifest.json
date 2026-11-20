@@ -1,13 +1,12 @@
 {
   "manifest_version": 2,
-  "name": "Thunderbird MCP",
+  "name": "tb-agent",
   "version": "0.10.0",
-  "description": "MCP server for AI assistants to access email, contacts, and calendars",
+  "description": "Connect Thunderbird to the local tb-agent daemon",
   "browser_specific_settings": {
     "gecko": {
-      "id": "thunderbird-mcp@tkasperczyk.dev",
-      "update_url": "https://updates.tomaszkasperczyk.name/thunderbird-mcp/updates.json",
-      "strict_min_version": "128.0",
+      "id": "tb-agent@mahoje.dk",
+      "strict_min_version": "154.0",
       "strict_max_version": "200.*"
     }
   },
@@ -20,9 +19,7 @@
     "128": "icons/icon-128.png"
   },
   "background": {
-    "scripts": [
-      "background.js"
-    ]
+    "page": "daemon-background.html"
   },
   "experiment_apis": {
     "mcpServer": {
@@ -41,7 +38,7 @@
     }
   },
   "options_ui": {
-    "page": "options.html"
+    "page": "daemon-options.html"
   },
   "permissions": [
     "accountsRead",
@@ -49,7 +46,11 @@
     "messagesRead",
     "messagesMove",
     "accountsFolders",
-    "compose"
+    "compose",
+    "storage",
+    "messagesUpdate",
+    "compose.save",
+    "messagesDelete"
   ],
   "web_accessible_resources": []
 }

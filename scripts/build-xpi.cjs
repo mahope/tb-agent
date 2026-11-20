@@ -9,7 +9,8 @@ const zlib = require('zlib');
 const PROJECT_DIR = path.resolve(__dirname, '..');
 const EXT_DIR = path.join(PROJECT_DIR, 'extension');
 const DIST_DIR = path.join(PROJECT_DIR, 'dist');
-const OUT_FILE = path.join(DIST_DIR, 'thunderbird-mcp.xpi');
+const CORE_ONLY = process.argv.includes('--core');
+const OUT_FILE = path.join(DIST_DIR, CORE_ONLY ? 'tb-agent-core.xpi' : 'thunderbird-mcp.xpi');
 const PACKAGE_FILE = path.join(PROJECT_DIR, 'package.json');
 
 function crc32(buf) {
@@ -97,7 +98,13 @@ function addDir(zip, dir, prefix) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     const zipPath = prefix ? prefix + '/' + entry.name : entry.name;
-    if (entry.isDirectory()) {
+    if (CORE_ONLY && ['mcp_server', 'httpd.sys.mjs', 'tool-access.js'].includes(zipPath)) continue;
+    if (CORE_ONLY && zipPath === 'manifest.json') {
+      const manifest = JSON.parse(fs.readFileSync(full, 'utf8'));
+      delete manifest.experiment_apis;
+      manifest.permissions = manifest.permissions.filter(permission => permission !== 'addressBooks');
+      zip.addFile(zipPath, Buffer.from(JSON.stringify(manifest, null, 2)));
+    } else if (entry.isDirectory()) {
       addDir(zip, full, zipPath);
     } else {
       zip.addFile(zipPath, fs.readFileSync(full));

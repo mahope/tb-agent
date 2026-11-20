@@ -588,11 +588,11 @@ function loadCalendarRuntime({
       if (related !== CALENDAR_ALARM_RELATIONS.ALARM_RELATED_ABSOLUTE) alarm.offset = new CalendarDuration(seconds);
       return alarm;
     },
-    async invoke(name, args) {
+    async invoke(name, args, signal) {
       sandbox.coerceToolArgs(name, args);
       const errors = sandbox.validateToolArgs(name, args);
       if (errors.length) return { error: errors.join("; ") };
-      return sandbox.callTool(name, args);
+      return sandbox.callTool(name, args, signal);
     },
   };
 }
