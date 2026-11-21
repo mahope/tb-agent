@@ -205,6 +205,14 @@
         ]
       },
       {
+        "name": "readDraftFolder",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          { "name": "identityId", "type": "string" }
+        ]
+      },
+      {
         "name": "readDaemonConnection",
         "type": "function",
         "async": true,

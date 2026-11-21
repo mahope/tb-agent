@@ -19,6 +19,12 @@ struct Args {
     /// Seconds an operation may take before the client gets a timeout error.
     #[arg(long, default_value_t = 120)]
     request_timeout: u64,
+    /// Account policy TOML. Defaults to the platform config directory.
+    #[arg(long, env = "TB_POLICY_FILE")]
+    policy_file: Option<PathBuf>,
+    /// Local JSONL audit log. Defaults to the platform local data directory.
+    #[arg(long, env = "TB_AUDIT_FILE")]
+    audit_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -33,6 +39,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let mut server = tbd::start(tbd::Config {
         bind: args.bind,
+        policy_file: args.policy_file,
+        audit_file: args.audit_file,
         connection_file: args.connection_file,
         request_timeout: Duration::from_secs(args.request_timeout),
     })

@@ -1,7 +1,8 @@
 import { connectDaemon, ToolError } from "./daemon-transport.mjs";
-import { dispatchCore } from "./mail-core.mjs";
+import { accountInventory, dispatchCore } from "./mail-core.mjs";
 
 const CORE = new Set([
+  "snapshotMessages", "restoreMessages",
   "listAccounts", "listFolders", "getAccountAccess", "searchMessages", "getRecentMessages",
   "getMessage", "getMessages", "getMessageHeaders", "batchGetMessageHeaders", "displayMessage",
   "updateMessage", "deleteMessages", "saveDraft", "sendMail", "replyToMessage", "forwardMessage",
@@ -34,6 +35,12 @@ function moduleFor(op, args) {
 }
 
 let settings;
+const messageSession = crypto.randomUUID();
+const WRITES = new Set(["restoreMessages", "updateMessage", "deleteMessages", "saveDraft", "sendMail",
+  "replyToMessage", "forwardMessage"]);
+let pendingWrite = Promise.resolve();
+const draftDestination = experiment => typeof experiment?.readDraftFolder === "function" ?
+  id => experiment.readDraftFolder(id) : undefined;
 let status = "Connecting";
 const experiment = () => browser.mcpServer;
 const reconnect = connectDaemon({
@@ -67,10 +74,15 @@ const reconnect = connectDaemon({
       thunderbird: (await browser.runtime.getBrowserInfo()).version,
       extensionVersion: browser.runtime.getManifest().version,
       modules: ["core", ...optional],
+      inventory: await accountInventory(browser, Array.isArray(settings.allowedAccounts) ? settings.allowedAccounts : [],
+        draftDestination(experiment())),
     };
   },
   async dispatch(op, args, signal, modules) {
     signal.throwIfAborted();
+    if (!Array.isArray(args._scope?.accounts) || !Array.isArray(args._scope?.headers)) {
+      throw new ToolError("access_denied", "The daemon did not provide an account scope.");
+    }
     if (args.skipReview === true && settings.allowDirectSend !== true) {
       throw new ToolError("access_denied", "Review is required. Omit skipReview.");
     }
@@ -82,14 +94,22 @@ const reconnect = connectDaemon({
     }
     const module = moduleFor(op, args);
     if (!module || !modules.includes(module)) throw new ToolError("unsupported_op", "Enable the matching optional module in tb-agent settings.");
-    if (module === "core") {
-      try {
-        return await dispatchCore(browser, op, args, signal, settings);
-      } catch (error) {
-        if (!["saveDraft", "replyToMessage"].includes(op) || error.code !== "draft_destination_unavailable" ||
-            !modules.includes("experiment.advanced-mail")) throw error;
+    const composeOperation = ["sendMail", "saveDraft", "replyToMessage", "forwardMessage"].includes(op);
+    if (module === "core" || composeOperation) {
+      const dispatch = () => {
         signal.throwIfAborted();
-      }
+        return dispatchCore(browser, op, args, signal, { ...settings, messageSession,
+          readDraftFolder: draftDestination(experiment()) });
+      };
+      if (!WRITES.has(op)) return dispatch();
+      const write = pendingWrite.then(dispatch);
+      pendingWrite = write.catch(() => {});
+      return write;
+    }
+    const independent = module === "experiment.calendar" || module === "experiment.contacts";
+    if (!independent && (args._scope.headers.length ||
+        !(settings.allowedAccounts ?? []).every(account => args._scope.accounts.includes(account)))) {
+      throw new ToolError("access_denied", "This optional mail operation requires full access to all accounts exposed by the extension.");
     }
     const integration = experiment();
     const requestId = crypto.randomUUID();
@@ -118,3 +138,9 @@ browser.runtime.onMessage.addListener(message => {
   if (message === "tb-agent-status") return Promise.resolve(status);
   return undefined;
 });
+
+for (const event of [browser.accounts.onCreated, browser.accounts.onDeleted, browser.accounts.onUpdated,
+  browser.identities?.onCreated, browser.identities?.onDeleted, browser.identities?.onUpdated,
+  browser.folders.onCreated, browser.folders.onDeleted, browser.folders.onRenamed, browser.folders.onMoved]) {
+  event?.addListener(reconnect);
+}

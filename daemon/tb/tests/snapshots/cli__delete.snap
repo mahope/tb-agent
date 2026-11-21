@@ -1,8 +1,10 @@
 ---
 source: tb/tests/cli.rs
-expression: "env.tb(&[\"delete\", \"m1@example.com\", \"--folder\", INBOX]).await.json()"
+expression: "audited_json(env.tb(&[\"delete\", \"m1@example.com\", \"--folder\", TRASH]).await)"
 ---
 {
+  "auditId": "<audit-id>",
   "deleted": 1,
+  "movedToTrash": false,
   "success": true
 }

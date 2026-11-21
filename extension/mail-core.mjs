@@ -50,12 +50,12 @@ function searchTerms(query = "") {
     ([, field, phrase, token]) => [field?.toLowerCase(), (phrase ?? token).toLowerCase()]);
 }
 
-function matches(message, terms) {
+function matches(message, terms, headersOnly) {
   const fields = {
     from: message.author,
     subject: message.subject,
-    to: (message.recipients ?? []).join(" "),
-    cc: (message.ccList ?? []).join(" "),
+    to: headersOnly ? "" : (message.recipients ?? []).join(" "),
+    cc: headersOnly ? "" : (message.ccList ?? []).join(" "),
   };
   return terms.every(([field, token]) => (field ? fields[field] : Object.values(fields).join(" "))
     ?.toLowerCase().includes(token));
@@ -83,18 +83,116 @@ function attachmentParts(part, root = true) {
   return (part.parts ?? []).flatMap(child => attachmentParts(child, false));
 }
 
+export async function accountInventory(api, allowed, readDraftFolder) {
+  const { accounts } = api;
+  const selected = (await accounts.list(true)).filter(account => allowed.includes(account.id));
+  const folders = {};
+  const identities = {};
+  const trashFolders = {};
+  let defaultIdentity;
+  const preferred = await accounts.getDefault(false);
+  for (const account of selected) {
+    const tree = account.rootFolder ? flatten(account.rootFolder) : [];
+    const special = role => tree.find(folder => folder.specialUse?.includes(role))?.id ?? null;
+    for (const folder of tree) folders[folder.id] = account.id;
+    for (const { id, email } of account.identities) {
+      const draftsFolder = readDraftFolder ? await readDraftFolder(id).catch(() => null) : special("drafts");
+      identities[id] = { accountId: account.id, email, draftsFolder, sentFolder: special("sent") };
+      defaultIdentity ??= id;
+    }
+    if (account.id === preferred?.id) {
+      const identity = await accounts.getDefaultIdentity(account.id);
+      if (identity && Object.hasOwn(identities, identity.id)) defaultIdentity = identity.id;
+    }
+    const trash = special("trash");
+    if (trash) trashFolders[account.id] = trash;
+  }
+  return { accounts: selected.map(account => account.id), folders, identities, defaultIdentity, trashFolders };
+}
+
 export async function dispatchCore(api, op, args, signal, settings) {
   const { accounts, compose, folders, messages, tabs } = api;
+  const scope = args._scope;
   const allowed = settings.allowedAccounts;
+  const permits = id => allowed.includes(id) && (!scope || scope.accounts.includes(id));
+  const headerOnly = id => scope?.headers.includes(id);
+  const session = settings.messageSession;
   if (!Array.isArray(allowed) || !allowed.every(id => typeof id === "string")) {
     fail("access_denied", "Choose the accounts to expose in tb-agent settings.");
   }
   const allAccounts = await accounts.list(true);
-  const accessible = allAccounts.filter(account => allowed.includes(account.id));
+  const accessible = allAccounts.filter(account => permits(account.id));
   const tree = accessible.flatMap(account => account.rootFolder ? flatten(account.rootFolder) : []);
   const byId = new Map(tree.map(folder => [folder.id, folder]));
   const special = (folder, type) => folder.specialUse?.includes(type);
-  const whollyAllowed = allAccounts.every(account => allowed.includes(account.id));
+  const whollyAllowed = allAccounts.every(account => allowed.includes(account.id) &&
+    (!scope || args._draftAccounts?.includes(account.id)));
+  const withinTrash = candidate => tree.some(parent => special(parent, "trash") && inScope(candidate, parent));
+
+  function trashFolder(accountId) {
+    const target = tree.find(item => item.accountId === accountId && special(item, "trash"));
+    if (scope && target?.id !== args._trashFolder) fail("conflict", "Trash folder changed. Reconnect to refresh the account inventory.");
+    return target;
+  }
+
+  function snapshot(message, messageId) {
+    return { messageId, instanceId: `${session}:${message.id}`, folderPath: message.folder.id,
+      read: message.read, flagged: message.flagged, tags: [...new Set(message.tags ?? [])].sort() };
+  }
+
+  function verify(expected, targets) {
+    if (!scope) return;
+    if (!Array.isArray(expected) || expected.length !== targets.length) fail("conflict", "Missing message snapshots.");
+    for (const { message, messageId } of targets) {
+      const current = snapshot(message, messageId);
+      const before = expected.find(item => item.messageId === messageId);
+      if (!before || Object.keys(current).some(key => JSON.stringify(current[key]) !== JSON.stringify(before[key]))) {
+        fail("conflict", "A message changed since its snapshot.");
+      }
+    }
+  }
+
+  async function moveTracked(message, destination) {
+    if (message.folder.id === destination.id) return messages.get(message.id);
+    let notify;
+    const completion = new Promise(resolve => { notify = resolve; });
+    const listener = (source, target) => {
+      if (source.messages.length !== 1 || source.messages[0].id !== message.id ||
+          source.messages[0].folder?.id !== message.folder.id) return;
+      const [moved] = target.messages;
+      if (target.messages.length === 1 && moved.folder?.id === destination.id &&
+          moved.headerMessageId === message.headerMessageId) notify(moved);
+    };
+    const cancelled = () => notify(null);
+    messages.onMoved.addListener(listener);
+    signal.addEventListener("abort", cancelled, { once: true });
+    const timer = setTimeout(cancelled, 15_000);
+    try {
+      signal.throwIfAborted();
+      await messages.move([message.id], destination.id);
+      const moved = await completion;
+      if (!moved) fail("operation_failed", "Thunderbird did not confirm the moved message instance.");
+      return moved;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", cancelled);
+      messages.onMoved.removeListener(listener);
+    }
+  }
+
+  async function afterWrite(targets, destination) {
+    const result = [];
+    for (const { message, messageId } of targets) {
+      signal.throwIfAborted();
+      const current = destination ? await moveTracked(message, destination) : await messages.get(message.id);
+      if (current.external || current.folder?.id !== (destination?.id ?? message.folder.id) ||
+          current.headerMessageId !== message.headerMessageId) {
+        fail("operation_failed", "Thunderbird did not confirm the updated message instance.");
+      }
+      result.push(snapshot(current, messageId));
+    }
+    return result;
+  }
 
   function inScope(candidate, parent, includeChildren = true) {
     return candidate.accountId === parent.accountId &&
@@ -128,9 +226,14 @@ export async function dispatchCore(api, op, args, signal, settings) {
     if (typeof id !== "string" || !id) fail("bad_request", "A message ID is required.");
     const source = folder(path);
     const query = id.replace(/^<|>$/g, "");
+    let found;
     for await (const message of pages(await messages.query({ folderId: source.id, headerMessageId: query }))) {
-      if (message.folder.id === source.id && message.headerMessageId === query) return message;
+      if (message.folder.id !== source.id || message.headerMessageId !== query) continue;
+      if (found && scope) fail("conflict", "Message ID is ambiguous in this folder.");
+      found = message;
+      if (!scope) break;
     }
+    if (found) return found;
     if (/^tb:\d+$/.test(query)) {
       const message = await messages.get(Number(query.slice(3))).catch(() => undefined);
       if (message?.folder?.id === source.id && !message.external && !message.headerMessageId) return message;
@@ -166,6 +269,7 @@ export async function dispatchCore(api, op, args, signal, settings) {
   }
 
   async function read(message, options) {
+    if (headerOnly(message.folder.accountId)) return headers(message);
     const full = await messageContent(message);
     const summary = summarize(message);
     if (settings.allowEncrypted !== true) summary.subject = await outerSubject(message);
@@ -204,7 +308,7 @@ export async function dispatchCore(api, op, args, signal, settings) {
         if (!selected.has(message.folder.id)) continue;
         const subject = settings.allowEncrypted === true ? message.subject : await outerSubject(message);
         const candidate = { ...message, subject };
-        if (matches(candidate, terms)) found.push(candidate);
+        if (matches(candidate, terms, headerOnly(message.folder.accountId))) found.push(candidate);
       }
     }
     const direction = args.sortOrder === "asc" ? 1 : -1;
@@ -234,15 +338,19 @@ export async function dispatchCore(api, op, args, signal, settings) {
   }
 
   async function composeMessage(source) {
-    if (args.skipReview === true) fail("unsupported_op", "Direct sending requires the advanced mail module.");
     if (args.sendAt || args.inReplyTo || args.references || args.includeSignature === false) {
       fail("unsupported_op", "This compose option requires the advanced mail module.");
     }
     const isDraft = op === "saveDraft" || (op === "replyToMessage" && args.saveAsDraft === true);
     // saveMessage uses the identity's configured draft destination. MailExtensions
     // cannot inspect or override it ahead of time.
-    if (isDraft && !whollyAllowed) fail("draft_destination_unavailable", "Saving drafts with restricted accounts requires the advanced mail module.");
-    if (isDraft && source && isProtected(await messages.getFull(source.id, { decrypt: false }))) {
+    if (isDraft && !settings.readDraftFolder && !whollyAllowed) fail("access_denied", "The configured draft destination cannot be verified within the account policy.");
+    const draftFolder = isDraft && scope ? folder(args._draftFolder) : null;
+    if (source) {
+      if (headerOnly(source.folder.accountId)) fail("access_denied", "Reply and forward require full message access.");
+      verify(args._expected, [{ message: source, messageId: args.messageId }]);
+    }
+    if ((isDraft || args.skipReview === true) && source && isProtected(await messages.getFull(source.id, { decrypt: false }))) {
       fail("access_denied", "Open a review window for a protected original.");
     }
     let replacement;
@@ -250,7 +358,8 @@ export async function dispatchCore(api, op, args, signal, settings) {
     if (args.replaceMessageId !== undefined || args.replaceFolderPath !== undefined) {
       replacement = await find(args.replaceMessageId, args.replaceFolderPath);
       if (!special(folder(replacement.folder.id), "drafts")) fail("bad_request", "Only drafts can be replaced.");
-      replacementTrash = tree.find(item => item.accountId === replacement.folder.accountId && special(item, "trash"));
+      replacementTrash = trashFolder(replacement.folder.accountId);
+      verify(args._expected, [{ message: replacement, messageId: args.replaceMessageId }]);
       if (!replacementTrash) fail("bad_request", "No separate Trash folder is available for the original draft.");
     }
     const preferred = source ? accessible.find(account => account.id === source.folder.accountId) : await accounts.getDefault(false);
@@ -267,17 +376,21 @@ export async function dispatchCore(api, op, args, signal, settings) {
       attachments.push({ file: new File([bytes], attachment.name, { type: attachment.contentType }) });
     }
     const account = accessible.find(item => item.identities.some(candidate => candidate.id === identity.id));
-    if (replacement && replacement.folder.accountId !== account.id) {
+    if (scope && (identity.id !== args.from || account.id !== args._identityAccount)) {
+      fail("conflict", "Sending identity changed. Reconnect to refresh the account inventory.");
+    }
+    if (replacement && (draftFolder ? draftFolder.id !== replacement.folder.id : replacement.folder.accountId !== account.id)) {
       fail("bad_request", "The selected identity belongs to a different account than the original draft.");
     }
-    if (isDraft && !tree.some(item => item.accountId === account.id && special(item, "drafts"))) {
+    if (isDraft && !draftFolder && !tree.some(item => item.accountId === account.id && special(item, "drafts"))) {
       fail("access_denied", "No Drafts folder in the selected identity's account.");
     }
     const details = { identityId: identity.id, attachments };
     // Keep the client's choice of Sent folder within the allowed account.
-    const sent = tree.find(item => item.accountId === account.id && special(item, "sent"));
-    details.overrideDefaultFcc = true;
-    details.overrideDefaultFccFolder = sent?.id ?? "";
+    const sent = scope ? (args._sentFolder && folder(args._sentFolder)) :
+      tree.find(item => item.accountId === account.id && special(item, "sent"));
+    details.overrideDefaultFccFolderId = sent?.id ?? "";
+    details.additionalFccFolderId = null;
     for (const field of ["to", "cc", "bcc", "subject"]) {
       if (args[field] !== undefined) details[field] = args[field];
     }
@@ -287,17 +400,32 @@ export async function dispatchCore(api, op, args, signal, settings) {
     if (op === "replyToMessage") tab = await compose.beginReply(source.id, args.replyAll ? "replyToAll" : "replyToSender", details);
     else if (op === "forwardMessage") tab = await compose.beginForward(source.id, "forwardInline", details);
     else tab = await compose.beginNew(details);
-    if (!isDraft) return { success: true, mode: "review" };
+    if (!isDraft && args.skipReview !== true) return { success: true, mode: "review" };
+    if (!isDraft) {
+      try {
+        signal.throwIfAborted();
+        await compose.sendMessage(tab.id, { mode: "sendNow" });
+        return { success: true, mode: "sent" };
+      } catch (error) {
+        await tabs.remove(tab.id).catch(() => {});
+        throw error;
+      }
+    }
     try {
       signal.throwIfAborted();
+      if (draftFolder && settings.readDraftFolder && await settings.readDraftFolder(identity.id) !== draftFolder.id) {
+        fail("conflict", "Draft folder changed. Reconnect to refresh the account inventory.");
+      }
+      signal.throwIfAborted();
       const saved = (await compose.saveMessage(tab.id, { mode: "draft" })).messages[0];
-      if (!saved || !byId.has(saved.folder?.id)) fail("operation_failed", "Check the identity's Copies & Folders settings for the saved draft.");
+      if (!saved || !byId.has(saved.folder?.id) || (draftFolder && saved.folder.id !== draftFolder.id)) fail("operation_failed", "Check the identity's Copies & Folders settings for the saved draft.");
       if (replacement && replacement.folder.id !== saved.folder.id) {
         fail("operation_failed", "The new draft was saved in a different folder. The original draft was preserved.");
       }
       if (replacement && replacement.id !== saved.id) {
         signal.throwIfAborted();
-        await messages.move([replacement.id], replacementTrash.id);
+        if (scope) await moveTracked(replacement, replacementTrash);
+        else await messages.move([replacement.id], replacementTrash.id);
       }
       return { success: true, messageId: summarize(saved).id, folderPath: saved.folder.id };
     } finally {
@@ -306,6 +434,50 @@ export async function dispatchCore(api, op, args, signal, settings) {
   }
 
   switch (op) {
+    case "snapshotMessages": {
+      const result = [];
+      for (const id of args.messageIds) result.push(snapshot(await find(id, args.folderPath), id));
+      return result;
+    }
+    case "restoreMessages": {
+      const targets = [];
+      const previous = args.expected.map(({ messageId }) => args.restore.find(item => item.messageId === messageId));
+      const destinations = previous.map(item => folder(item.folderPath));
+      if (destinations.some(item => special(item, "outbox"))) fail("conflict", "Cannot restore messages to Outbox.");
+      for (const item of args.expected) {
+        const source = folder(item.folderPath);
+        const prefix = `${session}:`;
+        const id = item.instanceId.startsWith(prefix) ? Number(item.instanceId.slice(prefix.length)) : NaN;
+        const message = Number.isSafeInteger(id) && await messages.get(id).catch(() => null);
+        if (!message || message.external || message.folder?.id !== source.id) {
+          fail("conflict", "The audited message instance is no longer in the expected folder.");
+        }
+        targets.push({ message, messageId: item.messageId });
+      }
+      verify(args.expected, targets);
+      if (destinations.some((item, index) => item.id !== targets[index].message.folder.id &&
+          withinTrash(item)) && args._allowTrashMove !== true) {
+        fail("conflict", "Restoring a message to Trash requires trash permission.");
+      }
+      const flagChanges = (message, { read, flagged, tags }) =>
+        message.read !== read || message.flagged !== flagged ||
+        JSON.stringify([...(message.tags ?? [])].sort()) !== JSON.stringify(tags);
+      if (args._allowTagRestore !== true && targets.some(({ message }, index) => flagChanges(message, previous[index]))) {
+        fail("conflict", "Restoring message flags requires tag permission.");
+      }
+      signal.throwIfAborted();
+      for (const [index, { message }] of targets.entries()) {
+        const { read, flagged, tags } = previous[index];
+        const target = destinations[index];
+        signal.throwIfAborted();
+        const current = target.id !== message.folder.id ? await moveTracked(message, target) : message;
+        if (flagChanges(current, previous[index])) {
+          if (args._allowTagRestore !== true) fail("operation_failed", "Thunderbird changed the flags during the move.");
+          await messages.update(current.id, { read, flagged, tags });
+        }
+      }
+      return { success: true, restored: targets.length };
+    }
     case "listAccounts":
       return Promise.all(accessible.map(async ({ id, name, type, identities }) => {
         const defaultIdentity = await accounts.getDefaultIdentity(id);
@@ -403,19 +575,23 @@ export async function dispatchCore(api, op, args, signal, settings) {
       const source = folder(args.folderPath);
       const deleting = op === "deleteMessages";
       const changes = deleting ? {} : args;
-      const trash = deleting ? special(source, "drafts") : changes.trash === true;
+      const trash = deleting ? (!!args._trashFolder && !withinTrash(source)) || special(source, "drafts") : changes.trash === true;
       if ((trash && (changes.moveTo || changes.copyTo)) || (changes.moveTo && changes.copyTo)) {
         fail("bad_request", "Move, copy and trash are mutually exclusive.");
       }
-      const move = trash ? tree.find(item => item.accountId === source.accountId && special(item, "trash")) :
+      const move = trash ? trashFolder(source.accountId) :
         changes.moveTo ? folder(changes.moveTo) : null;
       const copy = changes.copyTo ? folder(changes.copyTo) : null;
       if (trash && (!move || move.id === source.id)) fail("bad_request", "No separate Trash folder is available for this account.");
       if ([move, copy].some(item => item && special(item, "outbox"))) fail("access_denied", "Messages cannot be moved or copied to Outbox.");
+      if (scope && move && !trash && withinTrash(move) && args._allowTrashMove !== true) {
+        fail("access_denied", "Moving a message into Trash requires trash permission.");
+      }
       const targets = [];
-      for (const id of new Set(refs)) targets.push(await find(id, source.id));
+      for (const messageId of new Set(refs)) targets.push({ message: await find(messageId, source.id), messageId });
+      verify(args._expected, targets);
       signal.throwIfAborted();
-      for (const message of targets) {
+      for (const { message } of targets) {
         signal.throwIfAborted();
         const change = {};
         if (changes.read !== undefined) change.read = changes.read;
@@ -425,13 +601,19 @@ export async function dispatchCore(api, op, args, signal, settings) {
         }
         if (Object.keys(change).length) await messages.update(message.id, change);
       }
-      const ids = targets.map(message => message.id);
+      const ids = targets.map(({ message }) => message.id);
       signal.throwIfAborted();
       if (copy) await messages.copy(ids, copy.id);
       signal.throwIfAborted();
-      if (move) await messages.move(ids, move.id);
-      if (deleting && !trash) await messages.delete(ids, { isUserAction: true });
-      return { success: true, [deleting ? "deleted" : "updated"]: ids.length };
+      if (move && !scope) await messages.move(ids, move.id);
+      if (deleting && !trash) {
+        if (!withinTrash(source)) fail("access_denied", "No verified Trash is configured for this account.");
+        await messages.delete(ids, { deletePermanently: true, isUserAction: true });
+      }
+      const result = { success: true, [deleting ? "deleted" : "updated"]: ids.length };
+      if (deleting) result.movedToTrash = !!move;
+      if (scope && !copy && (!deleting || move)) result._after = await afterWrite(targets, move);
+      return result;
     }
     case "saveDraft":
     case "sendMail":

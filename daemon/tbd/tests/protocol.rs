@@ -397,7 +397,7 @@ async fn a_new_extension_connection_replaces_the_old_one() {
     let (daemon, first) = TestDaemon::with_extension(FakeConfig::default())
         .await
         .unwrap();
-    let second = FakeExtension::connect(daemon.info(), FakeConfig::default())
+    let second = FakeExtension::connect(daemon.extension_info(), FakeConfig::default())
         .await
         .unwrap();
     let c = client(daemon.info()).await;
@@ -447,7 +447,7 @@ async fn a_client_can_cancel_a_request() {
 }
 
 #[tokio::test]
-async fn hello_with_the_wrong_protocol_version_is_closed() {
+async fn version_one_hello_is_closed() {
     let daemon = TestDaemon::start().await.unwrap();
     let mut request = daemon.info().ws_url().into_client_request().unwrap();
     request.headers_mut().insert(
@@ -456,7 +456,7 @@ async fn hello_with_the_wrong_protocol_version_is_closed() {
     );
     let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     let hello = Frame::Hello(Hello {
-        protocol: 99,
+        protocol: 1,
         role: Role::Client,
         name: "old".into(),
         capabilities: None,

@@ -20,8 +20,8 @@ Build the XPI from your checkout or download it from a matching CI run.
 
 2. In Thunderbird, open Add-ons Manager and install `dist/tb-agent-core.xpi` from
    its gear menu. Start `daemon/target/debug/tbd` in a terminal.
-3. Open **tb-agent → Options** in Add-ons Manager. Import the `connection.json`
-   file at the path printed by `tbd`, select the accounts clients may access,
+3. Open **tb-agent → Options** in Add-ons Manager. Import the `connection.extension.json`
+   file next to the client connection file printed by `tbd`, select the accounts clients may access,
    and save permissions. No accounts are exposed until selected.
 4. In another terminal, run:
 
@@ -76,8 +76,8 @@ page and WebSocket transport when integrating changes.
                                                           IMAP / Exchange / Graph
 ```
 
-- **`tbd`, the daemon.** Listens on loopback only and writes its port and a random per-session
-  token to a connection file. It checks requests against the operation registry, relays them to
+- **`tbd`, the daemon.** Listens on loopback only and writes separate per-session connection
+  credentials for agent clients and the extension. It checks requests against the operation registry, relays them to
   the extension and relays the answers back. It has no mail logins of its own.
 - **The Thunderbird extension** connects *out* to the daemon as a WebSocket client. That means
   the core needs no Thunderbird Experiment APIs, and there is no native-messaging 1 MB limit:
@@ -134,6 +134,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cd ..
 npm test
+npm ci --ignore-scripts
+npm run lint
 node scripts/build-xpi.cjs
 node scripts/build-xpi.cjs --core
 ```
@@ -152,7 +154,49 @@ needed in CI. CLI output is covered by snapshot tests (`insta`).
 - Message content returned to agents is untrusted data. Sending still opens a compose window
   for review unless the user has allowed direct sending in the extension.
 
-The extension enforces the account allowlist for source folders, destination folders and sending identities. Direct sending requires both the user opt-in and the advanced mail module. A local audit log with undo is tracked separately.
+The extension's account selection and the daemon policy both apply to WebSocket
+requests. Direct sending requires both the user opt-in and the advanced mail module.
+The optional upstream HTTP bridge has its own settings. Keep it disabled for clients
+that should only have daemon-authorized access.
+
+### Account policy and undo
+
+Put `policy.toml` in the platform configuration directory under `tb-agent`
+(`~/.config/tb-agent/policy.toml` by default on Linux). You can also pass
+`tbd --policy-file /path/to/policy.toml` or set `TB_POLICY_FILE`. Restart the daemon when
+the file changes. Use Thunderbird account IDs from `tb accounts`.
+
+```toml
+[accounts.account1]
+access = "full"
+permissions = ["read", "move", "tag", "trash", "send"]
+
+[accounts.account2]
+access = "off"
+permissions = []
+```
+
+Unlisted accounts have `headers` access with `read`. Header results carry the message ID,
+sender, subject, date, folder, read and flagged status, and tags. `headers` grants only
+read access. `off` disables access. `full` enables the explicitly listed permissions.
+`move` covers move and copy, `tag` covers tags and read/flagged changes, `trash`
+covers trash and deletion, and `send` covers compose, send, draft, reply and forward.
+An explicit move into Trash also requires `trash`. Display in Thunderbird needs
+`read` and `tag` because the UI can automatically mark a message as read.
+Deletion moves messages to the registered Trash; deleting from Trash is permanent.
+The core XPI can save a draft when all Thunderbird accounts are selected and have
+`send` permission. The full XPI checks the configured draft destination directly.
+`filters`, `rules` and `accounts` are accepted for future operations.
+
+Writes go to the local JSONL audit log under the platform local data directory
+(`~/.local/share/tb-agent/audit.jsonl` by default on Linux). Override it with
+`--audit-file` or `TB_AUDIT_FILE`. A successful write returns an `auditId`.
+Use `tb undo <audit-id>` to restore the previous folder and flags after a move,
+tag, mark or trash operation, including deletions that move messages to Trash.
+Undo checks the current policy and restores only the specific message instances
+that still match the state recorded after the write. Keep the audit log
+and its lock file private. See the protocol for timeout and undo behavior.
+[Daemon protocol](docs/protocol.md#account-policy).
 
 ---
 

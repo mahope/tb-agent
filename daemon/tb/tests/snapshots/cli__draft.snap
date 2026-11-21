@@ -1,8 +1,9 @@
 ---
 source: tb/tests/cli.rs
-expression: "env.tb(&[\"draft\", \"--to\", \"a@example.com\", \"--subject\", \"Hi\", \"--body\",\n\"Text\", \"--attach\", \"/tmp/a.pdf\"]).await.json()"
+expression: "audited_json(env.tb(&[\"draft\", \"--to\", \"a@example.com\", \"--subject\", \"Hi\",\n\"--body\", \"Text\", \"--attach\", attachment.to_str().unwrap()]).await)"
 ---
 {
+  "auditId": "<audit-id>",
   "folderPath": "imap://work@mail.example.com/Drafts",
   "messageId": "draft-1@example.com",
   "success": true

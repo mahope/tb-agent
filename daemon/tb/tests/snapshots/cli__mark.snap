@@ -1,8 +1,9 @@
 ---
 source: tb/tests/cli.rs
-expression: out.json()
+expression: audited_json(out)
 ---
 {
+  "auditId": "<audit-id>",
   "success": true,
   "updated": 1
 }

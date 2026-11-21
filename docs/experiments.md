@@ -5,6 +5,10 @@ The core XPI (`node scripts/build-xpi.cjs --core`) has no Experiment declaration
 The full XPI (`node scripts/build-xpi.cjs`) can use the integrations below. Its
 tool modules are off until enabled in tb-agent settings. The daemon exposes the
 loaded module names through `tb status` and rejects calls to unavailable modules.
+Daemon-account policy also applies. The dispatcher currently denies folder
+management, filter management and account setup over the daemon connection.
+Optional mail reads require full read access across the extension's account
+allowlist. Calendar and contact modules keep their own profile-wide opt-ins.
 
 | Capability | What still uses an Experiment |
 | --- | --- |
@@ -17,13 +21,13 @@ loaded module names through `tb status` and rejects calls to unavailable modules
 | `experiment.calendar` | The upstream calendar, event and task tools use native calendar providers, recurrence handling and review dialogs. Enable this only to grant access to the profile's calendars. |
 | `experiment.contacts` | The upstream contact tools use native address book and vCard handling for their full field and provider support. Access is profile-wide when enabled. Writes require a separate checkbox. |
 | `experiment.account-setup` | `openAccountSetup` opens Thunderbird's interactive Account Hub. The user completes the setup in Thunderbird and can then add the new account to the allowlist. |
-| `experiment.advanced-mail` | Local attachment import/export paths, inline image content, custom draft threading headers, explicit signature suppression, Send Later, and `dryRunCompose` use upstream's native compose and MIME helpers. This module also handles direct sends with the upstream preflight checks and unattended draft saves under a partial account allowlist, where the identity's configured Drafts destination must be checked before saving. |
+| `experiment.advanced-mail` | Direct sends require this module and the direct-send opt-in. Attachment export, inline images and compose preflight can use the native helpers. Native compose writes that depend on local attachment paths, custom threading headers, signature suppression or Send Later are unavailable through the policy-aware daemon. |
 
 Core message updates, moves, copies, moves to Trash, body/header reads and compose
 review windows use only MailExtension APIs. A plain draft can also be saved using
-MailExtensions when the allowlist includes every mail account. MailExtensions
+MailExtensions when the allowlist includes every mail account and the policy grants `send` to all of them. MailExtensions
 save to the identity's configured Drafts folder and offer no preflight lookup
-of that destination. Core draft replacement requires an identity on the
+of that destination. The full XPI checks the actual destination before saving. Core draft replacement requires an identity on the
 original draft's account. If Thunderbird saves to a different folder, the call
 reports an error and preserves the original and the newly saved draft.
 

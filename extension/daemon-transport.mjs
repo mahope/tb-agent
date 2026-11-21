@@ -1,16 +1,19 @@
 const CHUNK_SIZE = 64 * 1024;
+const SINGLE_FRAME = new Set(["snapshotMessages", "restoreMessages", "updateMessage", "deleteMessages",
+  "saveDraft", "sendMail", "replyToMessage", "forwardMessage"]);
+const MAX_FRAME = 16 * 1024 * 1024;
 const MAX_RESULT = 256 * 1024 * 1024;
 
 export function connectionInfo(value) {
   const host = value?.host;
   const loopback = typeof host === "string" && (host === "::1" ||
     (/^127(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(host) && host.split(".").every(octet => Number(octet) <= 255)));
-  if (value?.protocol !== 1 || !loopback ||
+  if (value?.protocol !== 2 || !loopback ||
       !Number.isInteger(value.port) || value.port < 1 || value.port > 65535 ||
       typeof value.token !== "string" || !/^[0-9a-f]{64}$/.test(value.token)) {
-    throw new Error("Select a valid tbd protocol v1 connection file with a loopback address.");
+    throw new Error("Select a valid tbd protocol v2 connection file with a loopback address.");
   }
-  return { protocol: 1, host: value.host, port: value.port, token: value.token };
+  return { protocol: 2, host: value.host, port: value.port, token: value.token };
 }
 
 export class ToolError extends Error {
@@ -96,8 +99,12 @@ export function connectDaemon({ readConnection, capabilities, dispatch, setStatu
         if (new TextEncoder().encode(json).length > MAX_RESULT) {
           throw new ToolError("payload_too_large", "Result exceeds 256 MiB.");
         }
-        if (json.length <= CHUNK_SIZE) {
-          send({ type: "response", id, ok: true, result: result ?? null });
+        if (json.length <= CHUNK_SIZE || SINGLE_FRAME.has(op)) {
+          const response = { type: "response", id, ok: true, result: result ?? null };
+          if (SINGLE_FRAME.has(op) && new TextEncoder().encode(JSON.stringify(response)).length > MAX_FRAME) {
+            throw new ToolError("payload_too_large", "Audit result exceeds a single frame.");
+          }
+          send(response);
           return;
         }
         let seq = 0;
@@ -127,7 +134,7 @@ export function connectDaemon({ readConnection, capabilities, dispatch, setStatu
     }
 
     ws.onopen = () => send({
-      type: "hello", protocol: 1, role: "extension",
+      type: "hello", protocol: 2, role: "extension",
       name: `tb-agent extension ${advertised.extensionVersion}`, capabilities: advertised,
     });
     ws.onmessage = event => {
@@ -135,7 +142,7 @@ export function connectDaemon({ readConnection, capabilities, dispatch, setStatu
       let frame;
       try { frame = JSON.parse(event.data); } catch { return; }
       if (!frame || typeof frame !== "object") return;
-      if (frame.type === "welcome" && frame.protocol === 1 && !ready) {
+      if (frame.type === "welcome" && frame.protocol === 2 && !ready) {
         clearTimeout(handshake);
         ready = true;
         lastPong = Date.now();

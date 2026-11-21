@@ -50,6 +50,7 @@
     "storage",
     "messagesUpdate",
     "compose.save",
+    "compose.send",
     "messagesDelete"
   ],
   "web_accessible_resources": []

@@ -1,8 +1,9 @@
 ---
 source: tb/tests/cli.rs
-expression: "env.tb(&[\"trash\", \"m1@example.com\", \"m2@example.com\", \"--folder\",\nINBOX]).await.json()"
+expression: "audited_json(env.tb(&[\"trash\", \"m2@example.com\", BIG_MESSAGE, \"--folder\",\nINBOX]).await)"
 ---
 {
+  "auditId": "<audit-id>",
   "success": true,
   "updated": 2
 }

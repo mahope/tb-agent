@@ -16367,12 +16367,25 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
           daemonRequests.get(requestId)?.abort();
         },
 
+        readDraftFolder: async function(identityId) {
+          const { MailServices } = ChromeUtils.importESModule("resource:///modules/MailServices.sys.mjs");
+          const identity = MailServices.accounts.getIdentity(identityId);
+          const destination = identity?.draftsFolderURI ?? identity?.draftFolder;
+          const uri = typeof destination === "string" ? destination : destination?.URI;
+          if (!uri) return null;
+          const folder = MailServices.folderLookup.getFolderForURL(uri);
+          return folder ? context.extension.folderManager.convert(folder).id : null;
+        },
+
         readDaemonConnection: async function() {
           const env = name => Services.env.get(name);
           const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
           const override = env("TB_CONNECTION_FILE");
           if (override) {
             file.initWithPath(override);
+            const name = file.leafName;
+            const suffix = name.lastIndexOf(".");
+            file.leafName = (suffix > 0 ? name.slice(0, suffix) : name) + ".extension.json";
           } else {
             const home = Services.dirsvc.get("Home", Ci.nsIFile);
             if (Services.appinfo.OS === "WINNT") {
@@ -16389,7 +16402,7 @@ var mcpServer = class extends ExtensionCommon.ExtensionAPI {
               file.append("share");
             }
             file.append("tb-agent");
-            file.append("connection.json");
+            file.append("connection.extension.json");
           }
           if (!file.exists() || !file.isFile() || file.fileSize > 4096) return null;
           const input = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(Ci.nsIFileInputStream);

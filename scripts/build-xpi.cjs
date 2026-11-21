@@ -102,7 +102,7 @@ function addDir(zip, dir, prefix) {
     if (CORE_ONLY && zipPath === 'manifest.json') {
       const manifest = JSON.parse(fs.readFileSync(full, 'utf8'));
       delete manifest.experiment_apis;
-      manifest.permissions = manifest.permissions.filter(permission => permission !== 'addressBooks');
+      manifest.permissions = manifest.permissions.filter(permission => !['addressBooks', 'compose.send'].includes(permission));
       zip.addFile(zipPath, Buffer.from(JSON.stringify(manifest, null, 2)));
     } else if (entry.isDirectory()) {
       addDir(zip, full, zipPath);

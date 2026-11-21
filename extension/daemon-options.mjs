@@ -46,7 +46,7 @@ element("connection").addEventListener("change", async event => {
     await browser.storage.local.set({ daemonConnection: connectionInfo(JSON.parse(await file.text())) });
     feedback.textContent = "Connection file imported.";
   } catch {
-    feedback.textContent = "Select a valid tbd connection.json file.";
+    feedback.textContent = "Select a valid tbd connection.extension.json file.";
   } finally {
     event.target.value = "";
   }
